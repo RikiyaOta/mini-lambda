@@ -6,9 +6,10 @@
 
 ## 現在地
 
-- **Phase -1(OSの基礎)進行中** — 『ふつうのLinuxプログラミング』を読み進め中
+- **Phase -1(OSの基礎)進行中** — 本は一通り読み流した。`experiments/oslearn/` で `nix` を使った演習中
 - **Phase 0 の環境構築は完了** — GCPインスタンス作成、KVM動作確認済み
-- 次にやること: Phase -1 を進めつつ、リポジトリ構成と用語の地図を用意する
+- 次にやること: `mycp`(システムコールでファイルコピー)の **Step 3: strace で観察** から。
+  経緯と残タスクは `docs/notes/phase-minus1-syscall.md` に記録済み
 
 ---
 
@@ -107,7 +108,7 @@ KVMを触る前に、ユーザー空間とカーネルの境界を体で理解�
 - [ ] `strace` で自分のプログラムが発行したシステムコールを観察する習慣をつける
 - [ ] 押さえる概念:
     - [x] ファイルディスクリプタ(カーネルが実体を持ち、ユーザー空間には番号だけが渡る)
-    - [ ] `read`/`write` が要求より少なく返ること、`EINTR` の再試行
+    - [x] `read`/`write` が要求より少なく返ること、`EINTR` の再試行 — `mycp` で実装(`docs/notes/phase-minus1-syscall.md`)
     - [ ] システムコールの往復コスト(バッファサイズを1バイトにして体感する)
     - [ ] プロセスとfork/exec、シグナル、パイプ
     - [ ] 仮想メモリ(こちらも「仮想化」と呼ばれるが別概念。ただしEPTの理解に直結する)
@@ -424,6 +425,8 @@ loop {
 │   └── notes/             # Phaseごとの作業記録・つまずき・学び
 │       └── phase3-kvm.md
 ├── results/               # ベンチマークの生データ(CSV)
+├── experiments/           # 学習用の使い捨てコード(本体とは切り離す)
+│   └── oslearn/           # Phase -1: nix でsyscallを直接叩く練習(src/bin/ に足していく)
 ├── crates/
 │   ├── faas-api/          # HTTP層(axum)
 │   ├── faas-core/         # trait Sandbox、Function、manifest
