@@ -47,28 +47,49 @@ fn main() -> nix::Result<()> {
 }
 
 fn read(fd: &OwnedFd, buf: &mut [u8]) -> nix::Result<usize> {
-    match unistd::read(fd, buf) {
-        Err(Errno::EINTR) => read(fd, buf),
-        other => other,
+    loop {
+        match unistd::read(fd, buf) {
+            Err(Errno::EINTR) => continue,
+            other => return other,
+        }
     }
 }
 
-// write は n バイト書き込むつもりでも、それより少ないバイトしか書き込まない場合がある。
-// n バイト全て書き込むようにループさせる。
-// std::io::Write::write_all がやっていることらしい。
+/// write は n バイト書き込むつもりでも、それより少ないバイトしか書き込まない場合がある。
+/// n バイト全て書き込むようにループさせる。
+/// std::io::Write::write_all がやっていることらしい。
+///
+/// ## NOTE
+///
+/// Rust は末尾再帰を保証しないらしいので、再帰ではなくループで書いている。
 fn write_all(fd: &OwnedFd, buf: &[u8]) -> nix::Result<()> {
-    match unistd::write(fd, buf) {
-        Err(Errno::EINTR) => write_all(fd, buf),
-        Err(err) => Err(err),
-        Ok(m) => {
-            if m == buf.len() {
-                // 依頼した長さと実際に書き込んだ長さが一致。これは正常終了.
-                Ok(())
-            } else {
+    let n = buf.len();
+    let mut m = 0;
+    loop {
+        match unistd::write(fd, &buf[m..]) {
+            // プロセスがブロックしている最中にシグナルが届くと、カーネルがシステムコールを途中で打ち切ってしまうらしい。
+            // ただし、EINTR エラーの場合は1バイトも書き込んではいない。なので、単に再実行で良い。
+            // この手のエラーを再実行する仕組みがカーネルにある(`SA_RESTART`)が、再開されない syscall もあるので、結局自分で捌いた方が安全らしい。
+            Err(Errno::EINTR) => continue,
+
+            // それ以外のエラーは普通にエラーとして返す。
+            Err(err) => return Err(err),
+
+            Ok(0) => {
+                panic!(
+                    "0を返すことは想定されない。 `man 2 write` にも明記されていない。が、行儀の悪いデバイスドライバなどで発生した場合に、無限ループになるので明示的に落とす。std::io::Write::write_allでは独自のエラーを返している。"
+                );
+            }
+
+            Ok(written) => {
+                m += written;
+                if n == m {
+                    // 依頼した長さと実際に書き込んだ長さが一致。これは正常終了.
+                    return Ok(());
+                }
                 // 長さが違うと言うことは、全部は書き込んでくれていないはず。
                 // buf.len() - m だけ残っている。&buf[..m] までが書き込まれた。
-                // &buf[m..] からもう一度書いてくれればいい。再起呼び出しがシンプル（ループの方が性能いいのかな？）
-                write_all(fd, &buf[m..])
+                // &buf[m..] からもう一度書いてくれればいい。
             }
         }
     }
