@@ -1,0 +1,8 @@
+method,dst,file_bytes,buf_size,run,real_sec,user_sec,sys_sec,copy_syscall
+mycp,file,1073741824,65536,1,0.566,0.003,0.563,read+write
+mycp,file,1073741824,65536,2,0.457,0.007,0.450,read+write
+mycp,file,1073741824,65536,3,0.466,0.010,0.456,read+write
+stdcp,file,1073741824,,1,0.449,0.001,0.448,copy_file_range
+stdcp,file,1073741824,,2,0.418,0.000,0.418,copy_file_range
+stdcp,file,1073741824,,3,0.418,0.000,0.418,copy_file_range
+mycp,devnull,1073741824,65536,1,0.136,0.003,0.133,read only
