@@ -1,6 +1,6 @@
 //! 演習: std::fs::copy を使わずに、システムコールだけでファイルをコピーする。
 //!
-//! 使い方: mycp <src> <dst>
+//! 使い方: mycp <src> <dst> <buf_size(option)>
 
 use std::os::fd::OwnedFd;
 
@@ -11,39 +11,55 @@ use nix::unistd;
 
 fn main() -> nix::Result<()> {
     let mut args = std::env::args().skip(1); // １つ目はコマンド自体なので飛ばす。
-    match (args.next(), args.next()) {
-        (Some(src), Some(dst)) => {
-            let src_fd = open(src.as_str(), OFlag::O_RDONLY, Mode::empty())?;
-            let dst_fd = open(
-                dst.as_str(),
-                OFlag::O_WRONLY | OFlag::O_TRUNC | OFlag::O_CREAT,
-                Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IROTH, // permission 644 で作る.
-            )?;
-            let mut buf = [0u8; 8192];
-            loop {
-                let n = read(&src_fd, &mut buf)?;
-                if n == 0 {
-                    // 読み込みが完了していて、何も読むものがなかった。
-                    // つまり、コピー完了！
-                    break;
+    match (args.next(), args.next(), args.next()) {
+        (Some(src), Some(dst), Some(buf_size)) => match buf_size.parse() {
+            Ok(buf_size) => {
+                if buf_size > 0 {
+                    do_cp(&src, &dst, buf_size)
                 } else {
-                    // いくらか buf に読み取ったデータがある。
-                    // dst に書き込みが必要。
-                    write_all(&dst_fd, &buf[..n])?;
+                    eprintln!("[Error] 第３引数のバッファサイズは正の整数を入力してください.");
+                    std::process::exit(1);
                 }
             }
-
-            Ok(())
-
-            // ここでスコープ抜けるから、close は明示的に呼ばなくても良い。
-            // std::os::fd::OwnedFd が面倒を見てくれる。素敵。
-        }
+            Err(_e) => {
+                eprintln!("[Error] 第３引数にはバッファサイズ（bytes）を整数値で入力してください.");
+                std::process::exit(1);
+            }
+        },
+        (Some(src), Some(dst), None) => do_cp(&src, &dst, 8192),
         _ => {
             // エラーメッセージの詳細化は興味ないのでやらない。
             eprintln!("[Error] 引数不足");
             std::process::exit(1);
         }
     }
+}
+
+fn do_cp(src: &str, dst: &str, buf_size: usize) -> nix::Result<()> {
+    let src_fd = open(src, OFlag::O_RDONLY, Mode::empty())?;
+    let dst_fd = open(
+        dst,
+        OFlag::O_WRONLY | OFlag::O_TRUNC | OFlag::O_CREAT,
+        Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IROTH, // permission 644 で作る.
+    )?;
+    let mut buf: Box<[u8]> = vec![0u8; buf_size].into_boxed_slice(); // サイズが実行時にしか決まらないため、ヒープにバッファを確保する。
+    loop {
+        let n = read(&src_fd, &mut buf)?;
+        if n == 0 {
+            // 読み込みが完了していて、何も読むものがなかった。
+            // つまり、コピー完了！
+            break;
+        } else {
+            // いくらか buf に読み取ったデータがある。
+            // dst に書き込みが必要。
+            write_all(&dst_fd, &buf[..n])?;
+        }
+    }
+
+    Ok(())
+
+    // ここでスコープ抜けるから、close は明示的に呼ばなくても良い。
+    // std::os::fd::OwnedFd が面倒を見てくれる。素敵。
 }
 
 fn read(fd: &OwnedFd, buf: &mut [u8]) -> nix::Result<usize> {
