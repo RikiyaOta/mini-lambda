@@ -1,6 +1,6 @@
 # Phase -1: システムコールでファイルコピー (mycp)
 
-**日付**: 2026-09-04 開始 / 2026-09-08 完了
+**日付**: 2026-09-04 開始 / 2026-09-09 完了
 **成果物**: `experiments/oslearn/src/bin/mycp.rs`, `experiments/oslearn/src/bin/stdcp.rs`
 
 『ふつうのLinuxプログラミング』を一通り読み流した後、実際に手を動かすための演習。
