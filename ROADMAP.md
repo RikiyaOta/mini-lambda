@@ -11,8 +11,9 @@
 - **ファイルコピー演習(`mycp`)は完了(2026-09-09)** — Step 1〜5 を通し、下記「到達点の確認」3項目を回収した。
   記録は `docs/notes/phase-minus1-syscall.md`、実測は `results/phase-minus1-bufsize.csv` と
   `results/phase-minus1-copy-methods.csv`
-- **プロセス演習(`myrun`)に着手(2026-09-09)** — `fork`/`exec`/`waitpid` の Step 1 まで完了。
-  記録は `docs/notes/phase-minus1-process.md`。次は **Step 2(`pipe` で子の stdout を受け取る)** から
+- **プロセス演習(`myrun`)進行中(2026-09-09 着手)** — Step 1(`fork`/`exec`/`waitpid`)と
+  Step 2(`pipe` で子の stdout を受け取る)まで完了(2026-09-13)。
+  記録は `docs/notes/phase-minus1-process.md`。次は **Step 3(終了ステータスの分解 / シグナル)** から
 - そのあと: Phase -1 の最後の項目 **仮想メモリ**。Phase 3 の EPT に直結するので飛ばさない
 
 ---
@@ -114,7 +115,7 @@ KVMを触る前に、ユーザー空間とカーネルの境界を体で理解�
     - [x] ファイルディスクリプタ(カーネルが実体を持ち、ユーザー空間には番号だけが渡る)
     - [x] `read`/`write` が要求より少なく返ること、`EINTR` の再試行 — `mycp` で実装(`docs/notes/phase-minus1-syscall.md`)
     - [x] システムコールの往復コスト(バッファサイズを1バイトにして体感する) — 1B/4KB/64KB/1MB で計測(`results/phase-minus1-bufsize.csv`)
-    - [ ] プロセスとfork/exec、シグナル、パイプ — `myrun` で演習中(全5ステップ)。Step 1(`fork`/`exec`/`waitpid`)完了、次は Step 2(`pipe`)(`docs/notes/phase-minus1-process.md`)
+    - [ ] プロセスとfork/exec、シグナル、パイプ — `myrun` で演習中(全5ステップ)。Step 1(`fork`/`exec`/`waitpid`)・Step 2(`pipe`)完了、次は Step 3(シグナル)(`docs/notes/phase-minus1-process.md`)
     - [ ] 仮想メモリ(こちらも「仮想化」と呼ばれるが別概念。ただしEPTの理解に直結する)
 
 ### 到達点の確認
