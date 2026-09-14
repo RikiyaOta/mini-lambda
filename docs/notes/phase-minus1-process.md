@@ -19,8 +19,8 @@ stdout をレスポンスに、タイムアウト処理」の中身そのもの�
 | ---- | ------------------------------------------------------- | --------------------------- | ------------------- |
 | 1    | `fork` + `exec` + `waitpid` でコマンドを実行し終了ステータスを表示 | プロセス生成、PID、ゾンビ   | ✅ 完了(09-09)      |
 | 2    | `pipe` で子の stdout を親が読み取る                     | fd の付け替え、EOF          | ✅ 完了(09-13)      |
-| 3    | 終了ステータスを分解する(正常終了 / シグナルで死んだ)   | シグナル                    | ⬜ **次はここから** |
-| 4    | 時間内に終わらなければ子を殺す                          | `kill`、SIGTERM と SIGKILL  | ⬜                  |
+| 3    | 終了ステータスを分解する(正常終了 / シグナルで死んだ)   | シグナル                    | ✅ 完了(09-14)      |
+| 4    | 時間内に終わらなければ子を殺す                          | `kill`、SIGTERM と SIGKILL  | ⬜ **次はここから** |
 | 5    | `strace -f` で観察する                                  | `clone`/`execve`/`pipe2`/`dup2`/`wait4` | ⬜       |
 
 ---
@@ -50,6 +50,12 @@ touch /tmp/notexec && chmod -x /tmp/notexec
 # Step 2 以降: 親が出力を受け取る形になる
 ./target/debug/myrun echo hello         # → captured 6 bytes: "hello\n"
 ./target/debug/myrun ls -la /usr/bin    # → captured 72570 bytes (64KiB 超え。デッドロックの回帰テスト)
+
+# Step 3 以降: myrun 自身の終了コードが子に追従する
+./target/debug/myrun sh -c 'exit 3';            echo $?   # → exited with 3 / 3
+./target/debug/myrun sh -c 'kill -SEGV $$';     echo $?   # → killed by signal SIGSEGV / 139 (=128+11)
+./target/debug/myrun sh -c 'kill -TERM $$';     echo $?   # → killed by signal SIGTERM / 143 (=128+15)
+./target/debug/myrun sh -c 'kill -KILL $$';     echo $?   # → killed by signal SIGKILL / 137 (=128+9)
 ```
 
 ---
@@ -306,14 +312,51 @@ fork() 直後:   [書き口] ← 親が1本 / 子が1本         (計 2)  ← �
 
 ---
 
+## 分かったこと(Step 3: 終了ステータスの分解)
+
+### `waitpid` は「正常終了」と「シグナル死」を別物として返す。`$?` に落とすと区別が消える
+
+`WaitStatus::Exited(pid, code)` と `WaitStatus::Signaled(pid, signal, core_dumped)` は別バリアント。
+親プロセスは「どう死んだか」を完全に知っている。
+
+一方、終了コードは 0〜255 の 8bit しかなく、シグナル死を表す場所が無い。
+そこでシェルは **`128 + シグナル番号`** という慣習で `$?` に詰める(SIGSEGV=11 → 139)。
+だから `sh -c 'exit 139'` と「SIGSEGV で死んだ」は **`$?` だけ見ると区別できない**。
+情報は `waitpid` の時点では残っていて、`$?` に落とすときに失われる。
+
+### `WaitStatus::Stopped` は `WUNTRACED` を渡さないと返らない
+
+`man 2 waitpid` の options。デフォルトの `waitpid(pid, None)` は「終了」しか報告しない。
+一時停止(SIGSTOP 等)まで拾うのはデバッガやシェルのジョブ制御の仕事なので、今は扱わない。
+
+### コアダンプ = 死んだ瞬間のプロセスのメモリを丸ごとファイルに書き出したもの
+
+`Signaled` の第3要素。**シグナルで死ぬ = 予期しない死**なので、後から解剖できるように
+カーネルがプロセスのメモリ(全マッピング + レジスタ)を ELF 形式で吐き出す。それがコアダンプ。
+`gdb <実行ファイル> <core>` で「死んだ瞬間」を覗ける。
+
+- どのシグナルで吐くかは `man 7 signal` の **Action 列が `Core`** のもの(SIGSEGV / SIGABRT / SIGFPE / SIGBUS / SIGQUIT)。
+  SIGTERM / SIGKILL は `Term` なので吐かない
+- 実際に吐くかどうかは `ulimit -c`(`RLIMIT_CORE`)と `/proc/sys/kernel/core_pattern` で決まる。
+  この VM は `core_pattern` が `|/usr/share/apport/apport ...` のパイプ型で、apport が受け取って
+  `/var/lib/apport/coredump/` に置く
+- 中身は `file` で見ると `ELF 64-bit LSB core file, x86-64, from 'sh -c kill -SEGV $$'`。
+  `readelf -l` で LOAD セグメントが 25 個 = そのプロセスのメモリ領域が 25 個(`/proc/<pid>/maps` と対応)
+
+> **Phase 6 のスナップショットは、これを VM 1台分でやるもの**(ゲストのメモリ + vCPU レジスタを丸ごと書き出す)。
+> 「プロセスの死体」と「VM の静止画」は同じ発想。
+
+---
+
 ## 次にやること
 
 - [x] `fork` と `execvp` の間のメモリ確保(`CString::new`、`Vec`)を `fork` より前に移す
       → Step 2 で `pipe()` を `fork` の前に呼ぶ必要があり、自然に「fork 前の準備」ブロックができたので一緒に対応
 - [x] Step 2: `pipe` で子の stdout を親が読み取る(罠1〜4 すべて実際にハングさせて確認した)
-- [ ] Step 3: 終了ステータスを分解する(正常終了 / シグナルで死んだ) ← 次はここ
-- [ ] Step 4〜5(上の表の通り)
-- [ ] `docs/glossary.md` に追加する: プロセス / `fork` / `exec` / 終了コード / async-signal-safe / ABI / パイプ / EOF
+- [x] Step 3: 終了ステータスを分解する(正常終了 / シグナルで死んだ)
+- [ ] Step 4: 時間内に終わらなければ子を殺す(`alarm` + `SIGALRM` ハンドラ + `kill`) ← 次はここ
+- [ ] Step 5: `strace -f` で観察する
+- [ ] `docs/glossary.md` に追加する: プロセス / `fork` / `exec` / 終了コード / async-signal-safe / ABI / パイプ / EOF / シグナル / コアダンプ
 
 ### Phase -1 の残り(この演習以外)
 

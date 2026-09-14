@@ -93,9 +93,21 @@ fn main() -> nix::Result<()> {
                     match waitpid(child, None).expect("[Error] waitpid が失敗しました。") {
                         WaitStatus::Exited(pid, status) => {
                             println!("[myrun] pid={pid} exited with {status}");
-                            // 一旦 Step1 では 0 で固定する(Step3 で子に合わせる)
-                            exit(0);
+                            exit(status);
                         }
+
+                        // 第３引数はコアダンプを生成したかどうか。
+                        // 補足：コアダンプとは、「死んだ瞬間のプロセスのメモリをファイルに書き出したもの」のこと。
+                        //      シグナルでプロセスが死ぬのは予期しないことなので、後からデバッグができるようにカーネルが保存する。
+                        WaitStatus::Signaled(pid, signal, _) => {
+                            println!("[myrun] pid={} killed by signal {}", pid, signal);
+                            exit(128 + signal as i32);
+                        }
+
+                        // `WaitStatus::Stopped(Pid, Signal)` は来ない。
+                        // `man 2 waitpid` を確認すると、waitpid の引数(options)に `WUNTRACED` を渡した場合に、
+                        // 子プロセスが停止した場合に返ってくると書いてある。つまり、`WaitStatus::Stopped` は `WUNTRACED` を
+                        // 指定しない限りは返ってこない。
                         other => {
                             // 一旦他はまとめてエラーにしておくか。
                             eprintln!(
