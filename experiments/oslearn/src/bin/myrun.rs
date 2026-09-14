@@ -1,10 +1,18 @@
 use nix::errno::Errno;
 use nix::libc::_exit;
+use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, kill, sigaction};
 use nix::sys::wait::{WaitStatus, waitpid};
+use nix::unistd::alarm::set;
 use nix::unistd::{ForkResult, dup2_stdout, execvp, fork, pipe};
+use std::env::VarError;
 use std::ffi::CString;
 use std::os::fd::OwnedFd;
 use std::process::exit;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// 子プロセスにタイムアウトを設定するために用意したフラグ。
+// 親プロセスに対して SIGALARM が発行されたことを検知するために使う。
+static IS_SIGALARM_TRIGGERED: AtomicBool = AtomicBool::new(false);
 
 fn main() -> nix::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -51,6 +59,40 @@ fn main() -> nix::Result<()> {
                     // --------
                     drop(write_fd);
 
+                    // 環境変数 `MYRUN_TIMEOUT` が指定された場合は、指定された秒数後に親自身に SIGALARM を送るように設定する。
+                    // SIGALARM を受け取った時に、ブロック中の `read` が中断されて `EINTR` を受け取るので、それを合図に子プロセスを kill する。
+                    if let Some(timeout) = get_timeout() {
+                        // シグナルハンドラを登録する。
+                        // 具体的には、SIGALARM を受け取った時にカーネルがプロセスを一旦止めて実行する関数を登録する。
+                        // カーネルが呼び出すので、`extern "C"` の形式で関数を定義する必要がある（CのABIで行われる）。
+                        let _ = unsafe {
+                            // これが今回定義するシグナルハンドラ.
+                            extern "C" fn on_alarm(_signum: i32) {
+                                // `read` が `EINTR` を返した時に、その `EINTR` が SIGALARM 由来のものだと
+                                // 判断できるようにしてあげる必要がある。
+                                //
+                                // シグナルハンドラは、今まさに動いているスレッドを止めて、その上に割り込んで走る。
+                                // そのため、もしシグナルハンドラが走る前に何かロックを獲得していて、シグナルハンドラでそのロックを待つような処理を書いてしまうと、
+                                // ロックが解放されずにデッドロックになってしまう。この事情は、`fork` と `exec` と同様。
+                                //
+                                // `AtomicBool` は1命令で完了し、途中で止められる状態がないので、スレッド間でも安全だし、シグナル割り込みでも安全なので、
+                                // ---- １命令で完了するってことについて ---
+                                // AtomicBool は　CPU命令1個で処理できる。ハードウェアが、１バイトの書き込みが中途半端な状態で見えることがないと保証している。
+                                // 一方で、`Mutex` を使うような、ロックを使いたい場合というのは、複数ステップの処理の途中の状態を他人に見せたくない場合に使う。これはソフトウェア側で守る仕組み。
+                                // ------------------------------------
+                                //
+                                // シグナルハンドラ内でも安全に実行できる。
+                                IS_SIGALARM_TRIGGERED.store(true, Ordering::Relaxed);
+                            }
+                            let handler = SigHandler::Handler(on_alarm);
+                            let action = SigAction::new(handler, SaFlags::empty(), SigSet::empty());
+                            sigaction(Signal::SIGALRM, &action)?
+                        };
+
+                        // すでに set されていれば、残り秒数を返すらしいが、そこまで興味ないので単に無視する。
+                        let _ = set(timeout);
+                    }
+
                     // 子プロセスがパイプに書き込んだデータを読み込んで出力する。
                     let mut buf = [0u8; 8192]; // バッファサイズは固定しておく。
                     let mut n = 0;
@@ -71,23 +113,45 @@ fn main() -> nix::Result<()> {
                         // つまり、デッドロック。64KiB に満たない小さな出力なら問題ないが、大量の出力になると上の状態になってしまう。
                         // なので、親側では先に　`read` する必要がある。
                         // -----------
-                        let m = read(&read_fd, &mut buf)?;
-                        if m == 0 {
-                            // 子プロセスが書き込んだデータを全て読み取った。
-                            break;
-                        } else {
-                            // 新しく読み取ったデータがある。
-                            // 読み込んだバイト数は n に累積していく。
-                            // 読み込んだデータは res に詰め込んでいく。最後に出力する必要があるため。
-                            n += m;
-                            bytes.extend_from_slice(&buf[..m]);
+                        match read(&read_fd, &mut buf)? {
+                            ReadResult::Success(0) => {
+                                // 子プロセスが書き込んだデータを全て読み取った。
+                                println!(
+                                    "[myrun] captured {} bytes: \"{}\"",
+                                    n,
+                                    String::from_utf8_lossy(&bytes[..n]).escape_debug()
+                                );
+                                break;
+                            }
+                            ReadResult::Success(m) => {
+                                // 新しく読み取ったデータがある。
+                                // 読み込んだバイト数は n に累積していく。
+                                // 読み込んだデータは res に詰め込んでいく。最後に出力する必要があるため。
+                                n += m;
+                                bytes.extend_from_slice(&buf[..m]);
+                            }
+                            ReadResult::Timeout => {
+                                // 子プロセスのタイムアウトになった。
+                                // タイムアウトになった旨のログ出力と、子プロセスの kill を実施する。
+                                println!(
+                                    "[myrun] timeout ({}s), sending SIGTERM to pid={}",
+                                    get_timeout().unwrap(), // Timeout になる場合はタイムアウトは指定されているはずなので、Noneになることは想定されない。
+                                    child
+                                );
+                                kill(child, Signal::SIGTERM)?;
+
+                                // この後、以下2つを実施する必要がある:
+                                // 1. パイプの EOF まで読み切ること。
+                                // 2. `waitpid` をすること。
+                                //
+                                // 1 は、タイムアウト前に子プロセスがパイプに書き込んでいたデータが残っている可能性があるため。なので最後まで読み取る必要がある。
+                                // なので、この分岐では `break` を呼ばずに次のループに移る。そうすれば、`read` が最後まで読み取って終了する。
+                                //
+                                // 2 は、子プロセスが正常に終了したことを判断しないと、ゾンビプロセスとして残ってしまう。
+                                // 加えて、`waitpid` の結果を見て初めて、子プロセスが本当にSIGTERMで死んだのか、SIGTERMを無視して（trapして）生きていたのかが分かるから。
+                            }
                         }
                     }
-                    println!(
-                        "[myrun] captured {} bytes: \"{}\"",
-                        n,
-                        String::from_utf8_lossy(&bytes[..n]).escape_debug()
-                    );
 
                     // 子プロセスの処理が完了するのを待つ。
                     match waitpid(child, None).expect("[Error] waitpid が失敗しました。") {
@@ -120,6 +184,15 @@ fn main() -> nix::Result<()> {
                 }
 
                 // この分岐が子プロセス側の処理と思われる.
+                //
+                // この分岐は `fork` の直後なので、メモリを割りあげるなど、スレッド間の競合を防ぐロックを使うコードは書いてはダメ。
+                // 基本的には、すぐに `exec` を実行するだけ。
+                // なぜか？
+                // -----
+                // `fork` はプロセスをコピーするのだが、スレッドは実は、現在のスレッドしかコピーしない。
+                // 仮に fork 元で、他のスレッドがロックを獲得していた場合、fork 後のプロセスでは、ロックを獲得しているプロセスが存在しないため、いつまでもロックが解放されずにデッドロックが起きる。
+                // println! も、stdout のロックを取得するので、実行してはダメ。
+                // -----
                 Ok(ForkResult::Child) => {
                     // 子プロセスは read_fd を使わないので明示的に閉じておく。
                     // これをしないとどうなるか？
@@ -190,13 +263,40 @@ fn main() -> nix::Result<()> {
     }
 }
 
-/// `mycp.rs` で実装したものをコピーしてきた。
-/// 単に `EINTR` をハンドリングして再実行しつつ読み取るだけのラッパー。
-fn read(fd: &OwnedFd, buf: &mut [u8]) -> nix::Result<usize> {
+fn get_timeout() -> Option<u32> {
+    match std::env::var("MYRUN_TIMEOUT") {
+        Ok(v) => Some(
+            v.parse::<u32>()
+                .expect("[Error] MYRUN_TIMEOUT には秒数を指定してください。"),
+        ),
+        Err(VarError::NotPresent) => None,
+        Err(VarError::NotUnicode(_)) => {
+            panic!("[Error] ここは到達しないはず。MYRUN_TIMEOUT は Unicode なので。")
+        }
+    }
+}
+
+enum ReadResult {
+    // 最後まで読み取りが成功。読み取ったバイト数を返す。
+    Success(usize),
+
+    // タイムアウトのために処理が中断された場合。
+    Timeout,
+}
+
+/// 親プロセスが SIGALARM を受け取ったことに由来する EINTR が返ってきた時は、直ちに処理を中断する（子プロセスのタイムアウトのため）。
+/// それ以外の場合は単に再実行する。
+fn read(fd: &OwnedFd, buf: &mut [u8]) -> nix::Result<ReadResult> {
     loop {
         match nix::unistd::read(fd, buf) {
-            Err(Errno::EINTR) => continue,
-            other => return other,
+            Err(Errno::EINTR) => {
+                if IS_SIGALARM_TRIGGERED.load(Ordering::Relaxed) {
+                    return Ok(ReadResult::Timeout);
+                }
+                continue;
+            }
+            Err(e) => return Err(e),
+            Ok(n) => return Ok(ReadResult::Success(n)),
         }
     }
 }

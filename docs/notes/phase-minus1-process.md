@@ -348,15 +348,118 @@ fork() 直後:   [書き口] ← 親が1本 / 子が1本         (計 2)  ← �
 
 ---
 
+## 分かったこと(Step 4: タイムアウトと `kill`) ※作業中
+
+### シグナルハンドラは「別スレッド」ではなく「今のスレッドへの割り込み」
+
+SIGALRM が届くと、カーネルは**今まさに動いていたスレッドを途中で止めて**、登録した関数に飛び込ませる。
+呼ぶのはカーネルなので、関数は C の呼び出し規約で書く = `extern "C" fn(i32)`。
+`CString` が「データの形を C に合わせる」なら、`extern "C"` は「関数の呼び方を C に合わせる」。
+
+### async-signal-safe の正体は「スレッドセーフ」ではなく「途中がないこと」 ★重要
+
+止められた側は「何かの真っ最中」かもしれない。`println!` の途中(stdout のロック保持中)で割り込まれ、
+ハンドラが `println!` を呼ぶと、ロックの持ち主は「ハンドラの下で止まっている自分自身」なので永久に解放されない。
+
+```
+メイン: println! → stdout のロック取得 → 書き込み中 ← ここで SIGALRM
+  └ ハンドラ: println! → ロック取得を試みる → 持ち主は止まっている自分 → デッドロック
+```
+
+`fork` のときと同じ形。「ロックを持ったまま二度と動かない誰かがいる」。
+fork では「子に存在しないスレッド」、シグナルでは「ハンドラの下で止まっている自分」。`malloc` も同じ理由でダメ。
+
+| | スレッドセーフ | シグナルセーフ |
+| --- | --- | --- |
+| `AtomicBool` | ○ | ○(途中がない) |
+| `Mutex<bool>` | ○ | **×**(割り込まれた側がロックを持っているかも) |
+
+ハンドラの仕事は「フラグを1つ立てる」だけにする。C の `volatile sig_atomic_t` に相当するのが Rust の `static AtomicBool`。
+
+### `AtomicBool` に「途中がない」とは
+
+ロックは「複数の CPU 命令にまたがる途中状態を、他人(他スレッド or ハンドラ)に見せない」ための道具。
+`counter += 1` は「読む → 足す → 書く」の3命令なので途中がある。
+
+`on_alarm` を release ビルドで逆アセンブルすると:
+
+```
+<on_alarm>:
+   movb   $0x1, IS_SIGALARM_TRIGGERED(%rip)    ← CPU 命令1個
+   ret
+```
+
+ハードウェアが「アラインされた1ワードの書き込みは半端な状態を見せない」と保証しているので、
+守るべき「途中」が存在しない。守るものがないからロックがない。
+
+| 道具 | 守り方 | できること |
+| --- | --- | --- |
+| `Mutex` | 「途中」の間、他人を**待たせる** | 複数の値・複数ステップをまとめて1つの操作にできる |
+| `AtomicBool` | 「途中」を**作らない** | 1つの値に対する1回の操作だけ |
+
+`fetch_add` のような読み書き込みも `lock add` 1命令に翻訳されるので同じ枠。
+複数コアが本当に同時に動く今の CPU でも成り立つのはハードウェアの保証のおかげ。
+→ Phase 3 で vCPU スレッドと HTTP スレッドの状態共有で再登場する。
+
+### `EINTR` は「常に再試行」ではない
+
+`mycp` の `read` ラッパーは `EINTR` を握りつぶして再試行していた。Step 2 まではそれで正しかった。
+今回は SIGALRM 由来の `EINTR` が「時間切れの合図」なので、`EINTR` を受けたらフラグを見て分岐する。
+時計で経過時間を測るのは間接的な推定で、「SIGALRM が来た」と知っているのはハンドラだけ。
+
+`sigaction` に `SA_RESTART` を付けると `read` が勝手に再開されて `EINTR` が来なくなる(`man 7 signal` の
+"Interruption of system calls")ので、今回は付けない(`SaFlags::empty()`)。
+
+### `kill` の後にやること
+
+1. **パイプを EOF まで読み切る** — タイムアウト前に子が書いた分がパイプに残っている。
+   `break` すると捨ててしまう。`kill` 後は読み取りループに戻れば、子が死ぬ → 書き口が閉じる → EOF → `waitpid` へ自然に流れる
+2. **`waitpid` する** — ゾンビ回避に加えて、「SIGTERM で本当に死んだのか、無視して生きているのか」は
+   `waitpid` の結果でしか分からない。SIGKILL に切り替える判断材料
+
+SIGTERM のデフォルト動作は子のコードを一切走らせずカーネルが即終了させる(フラッシュも無い)。
+「子が SIGTERM を握って後始末する」場合だけ Step 2 の罠4(パイプ満杯で詰まる)が再発する。
+
+### 6秒問題: `kill` の宛先は「1匹」だった ★Phase 1 で必ず踏む
+
+```
+$ time (MYRUN_TIMEOUT=2 myrun sh -c 'echo partial; sleep 6; echo done')
+[myrun] timeout (2s), sending SIGTERM to pid=20127
+[myrun] captured 8 bytes: "partial\n"
+[myrun] pid=20127 killed by signal SIGTERM
+real    0m6.003s      ← 2 秒ではなく 6 秒
+```
+
+`strace -f` で見ると `myrun → sh → sleep` の3段。`sh` は 2 秒で死んでいるが、
+`sleep` は `sh` から fork+exec で**パイプの書き口を引き継いだまま**生きている。
+書き口を握る fd が残っている限り EOF は来ない(Step 2 の法則)ので、`sleep` が自然死するまで親の `read` が戻らない。
+
+`sh -c 'echo partial; sleep 10'` も同じ(dash は最後のコマンドも fork する。`strace -f` で確認済み)。
+
+対処は**プロセスグループ**。`kill(pid)` はプロセス1つが宛先だが、グループ宛なら全員に届く。
+子が `setpgid(0, 0)` で自分を先頭とする新グループを作り(PGID = 子の PID)、親は `killpg(child, SIGTERM)` で群れごと殺す。
+`man 2 kill` の「pid が -1 より小さいとき」= 負の PID がグループ宛の印。
+
+プロセスグループは孫が `setsid` で脱走できるので、本番のコンテナ基盤は cgroup / PID namespace を使う(Phase 5)。
+
+---
+
 ## 次にやること
 
 - [x] `fork` と `execvp` の間のメモリ確保(`CString::new`、`Vec`)を `fork` より前に移す
       → Step 2 で `pipe()` を `fork` の前に呼ぶ必要があり、自然に「fork 前の準備」ブロックができたので一緒に対応
 - [x] Step 2: `pipe` で子の stdout を親が読み取る(罠1〜4 すべて実際にハングさせて確認した)
 - [x] Step 3: 終了ステータスを分解する(正常終了 / シグナルで死んだ)
-- [ ] Step 4: 時間内に終わらなければ子を殺す(`alarm` + `SIGALRM` ハンドラ + `kill`) ← 次はここ
+- [ ] Step 4: 時間内に終わらなければ子を殺す(`alarm` + `SIGALRM` ハンドラ + `kill`) ← 作業中(2026-09-14)
+      - [x] `MYRUN_TIMEOUT=2 myrun sleep 10` → SIGTERM で殺して `$?`=143。タイムアウト前の出力も回収できる
+      - [x] 6秒問題の原因を特定: 孫の `sleep` が書き口を握っている(上の「分かったこと」参照)
+      - [ ] **次はここ**: プロセスグループで群れごと殺す。子で `setpgid(Pid::from_raw(0), Pid::from_raw(0))`
+            (`fork` 後・`exec` 前)、親は `kill` を `killpg(child, SIGTERM)` に変える。
+            確認: `time (MYRUN_TIMEOUT=2 myrun sh -c 'echo partial; sleep 10')` が 2 秒で戻ること、
+            `strace -f -e trace=kill` で `kill(-<pid>, SIGTERM)` と負の PID が出ること
+      - [ ] SIGTERM を無視する子(`sh -c 'trap "" TERM; sleep 10'`)への SIGKILL エスカレーション
 - [ ] Step 5: `strace -f` で観察する
-- [ ] `docs/glossary.md` に追加する: プロセス / `fork` / `exec` / 終了コード / async-signal-safe / ABI / パイプ / EOF / シグナル / コアダンプ
+- [ ] `docs/glossary.md` に追加する: プロセス / `fork` / `exec` / 終了コード / async-signal-safe / ABI / パイプ / EOF / シグナル / コアダンプ / async-signal-safe と Atomic / プロセスグループ
 
 ### Phase -1 の残り(この演習以外)
 
