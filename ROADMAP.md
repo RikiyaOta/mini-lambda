@@ -14,7 +14,10 @@
 - **プロセス演習(`myrun`)は完了(2026-09-15)** — fork/exec/pipe/シグナル死/タイムアウト(SIGTERM→SIGKILL、
   プロセスグループで孫まで)が動き、`strace -f` で全体を読み、`std::process::Command` との差分も言語化した。
   記録は `docs/notes/phase-minus1-process.md`
-- **次の演習: 仮想メモリ**(Phase -1 の最後の項目。Phase 3 の EPT に直結するので飛ばさない)
+- **仮想メモリ演習(`mymem`)を開始(2026-09-15)** — Phase -1 の最後の項目。全5ステップ
+  (アドレス空間を見る → 遅延割り当て → CoW → 仮想/物理の変換 → `userfaultfd`)。
+  Phase 3 の EPT と Phase 6 のスナップショットに直結するので飛ばさない。
+  **Step 1 進行中**(VSZ と RSS の差までは確認済み)。記録は `docs/notes/phase-minus1-memory.md`
 
 ---
 
