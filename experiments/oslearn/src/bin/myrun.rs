@@ -1,9 +1,9 @@
 use nix::errno::Errno;
 use nix::libc::_exit;
-use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, kill, sigaction};
+use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, killpg, sigaction};
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::alarm::set;
-use nix::unistd::{ForkResult, dup2_stdout, execvp, fork, pipe};
+use nix::unistd::{ForkResult, Pid, dup2_stdout, execvp, fork, pipe, setpgid};
 use std::env::VarError;
 use std::ffi::CString;
 use std::os::fd::OwnedFd;
@@ -138,7 +138,7 @@ fn main() -> nix::Result<()> {
                                     get_timeout().unwrap(), // Timeout になる場合はタイムアウトは指定されているはずなので、Noneになることは想定されない。
                                     child
                                 );
-                                kill(child, Signal::SIGTERM)?;
+                                killpg(child, Signal::SIGTERM)?;
 
                                 // この後、以下2つを実施する必要がある:
                                 // 1. パイプの EOF まで読み切ること。
@@ -208,6 +208,13 @@ fn main() -> nix::Result<()> {
                     // 子プロセスの stdout を write_fd にリダイレクトする。
                     // これによって、子プロセス側で標準出力に書きこんだデータが、パイプ経由で親プロセスから read_fd で読み込める。
                     dup2_stdout(write_fd).expect("[Error] 子プロセスでの dup に失敗しました。");
+
+                    // 子のさらに子（親から見れば孫）など、さらに下の階層のプロセスもまとめて kill するためにプロセスグループを定義する。
+                    // pid=0 は呼び出したプロセス自身を意味する。つまりここでは子プロセス。
+                    if setpgid(Pid::from_raw(0), Pid::from_raw(0)).is_err() {
+                        // `man timeout` に合わせて、コマンド自体が壊れていることを表す 125 にしておく。深い意図はない。
+                        unsafe { _exit(125) };
+                    };
 
                     // execvp は PATH を解釈してコマンドを実行してくれる.
                     // exec は Err(Errno) しか返さない。Ok を返さない。Infalliable は variant を持たないし、実装を見ても、Ok を返さないことはすぐわかった。
