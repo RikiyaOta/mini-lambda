@@ -20,8 +20,8 @@ stdout をレスポンスに、タイムアウト処理」の中身そのもの�
 | 1    | `fork` + `exec` + `waitpid` でコマンドを実行し終了ステータスを表示 | プロセス生成、PID、ゾンビ   | ✅ 完了(09-09)      |
 | 2    | `pipe` で子の stdout を親が読み取る                     | fd の付け替え、EOF          | ✅ 完了(09-13)      |
 | 3    | 終了ステータスを分解する(正常終了 / シグナルで死んだ)   | シグナル                    | ✅ 完了(09-14)      |
-| 4    | 時間内に終わらなければ子を殺す                          | `kill`、SIGTERM と SIGKILL  | ⬜ **次はここから** |
-| 5    | `strace -f` で観察する                                  | `clone`/`execve`/`pipe2`/`dup2`/`wait4` | ⬜       |
+| 4    | 時間内に終わらなければ子を殺す                          | `kill`、SIGTERM と SIGKILL  | ✅ 完了(09-15)      |
+| 5    | `strace -f` で観察する                                  | `clone`/`execve`/`pipe2`/`dup2`/`wait4` | ⬜ **次はここから** |
 
 ---
 
@@ -56,6 +56,11 @@ touch /tmp/notexec && chmod -x /tmp/notexec
 ./target/debug/myrun sh -c 'kill -SEGV $$';     echo $?   # → killed by signal SIGSEGV / 139 (=128+11)
 ./target/debug/myrun sh -c 'kill -TERM $$';     echo $?   # → killed by signal SIGTERM / 143 (=128+15)
 ./target/debug/myrun sh -c 'kill -KILL $$';     echo $?   # → killed by signal SIGKILL / 137 (=128+9)
+
+# Step 4 以降: MYRUN_TIMEOUT 秒で SIGTERM、1 秒待って SIGKILL。孫プロセスまで巻き込む
+time (MYRUN_TIMEOUT=2 ./target/debug/myrun sh -c 'echo partial; sleep 10')       # → 2 秒 / captured "partial\n" / 143
+time (MYRUN_TIMEOUT=2 ./target/debug/myrun sh -c 'trap "" TERM; sleep 10')       # → 3 秒 / SIGKILL / 137
+MYRUN_TIMEOUT=2 ./target/debug/myrun sh -c 'echo ok'                             # → 時間内なら今まで通り
 ```
 
 ---
@@ -348,7 +353,7 @@ fork() 直後:   [書き口] ← 親が1本 / 子が1本         (計 2)  ← �
 
 ---
 
-## 分かったこと(Step 4: タイムアウトと `kill`) ※作業中
+## 分かったこと(Step 4: タイムアウトと `kill`)
 
 ### シグナルハンドラは「別スレッド」ではなく「今のスレッドへの割り込み」
 
@@ -442,6 +447,38 @@ real    0m6.003s      ← 2 秒ではなく 6 秒
 
 プロセスグループは孫が `setsid` で脱走できるので、本番のコンテナ基盤は cgroup / PID namespace を使う(Phase 5)。
 
+### SIGTERM → SIGKILL の2段階
+
+`sh -c 'trap "" TERM; sleep 10'` に SIGTERM を送っても誰も死なない。**「無視」に設定されたシグナルは
+`fork` と `exec` を越えて引き継がれる**(`man 2 execve` の Signals)ので、`sleep` も無視する。
+EOF が永遠に来ず、親は `read` で固まる(外側を `timeout 5` で囲うと 124 で殺される)。
+
+SIGKILL は "cannot be caught, blocked, or ignored"(`man 7 signal`)。これが SIGTERM(お願い)と
+SIGKILL(強制)の使い分けの根拠。Phase 1 の関数強制終了も同じ2段階になる。
+
+実装は「1回目のアラーム / 2回目のアラーム」の状態を親のループに持ち、1回目で SIGTERM + フラグ戻し + `alarm(1)`、
+2回目で SIGKILL。EOF が来たら `alarm::cancel()` で猶予アラームを解除する(残すと後続の `waitpid` を割り込む)。
+
+```
+11845 alarm(2)                = 0
+11845 kill(-11846, SIGTERM)   = 0     ← 2 秒後。グループ宛
+11845 alarm(1)                = 0     ← 猶予
+11845 kill(-11846, SIGKILL)   = 0     ← 3 秒後
+11846 +++ killed by SIGKILL +++       ← sh
+11847 +++ killed by SIGKILL +++       ← sleep(孫)
+11845 alarm(0)                = 0     ← cancel
+```
+
+### ラッパー自身の失敗は 125
+
+`setpgid` の失敗は「コマンドの側」の問題ではなく `myrun` 自身の準備の失敗。126/127 にすると
+呼び出し元が「コマンドが壊れている」と誤解する。`timeout` / `env` / `nice` / `nohup` は
+**125 = the command itself fails** で統一している(`timeout --help` の Exit status)。
+
+`timeout` はタイムアウト時に 124 を返し、`--preserve-status` で子の死因(143)に切り替えられる。
+`myrun` は 143 のまま。「呼び出し元が『時間切れ』と『シグナル死』を区別したいか」で決まる設計判断で、
+Phase 1 で HTTP ステータスに翻訳するときに再考する。
+
 ---
 
 ## 次にやること
@@ -450,16 +487,14 @@ real    0m6.003s      ← 2 秒ではなく 6 秒
       → Step 2 で `pipe()` を `fork` の前に呼ぶ必要があり、自然に「fork 前の準備」ブロックができたので一緒に対応
 - [x] Step 2: `pipe` で子の stdout を親が読み取る(罠1〜4 すべて実際にハングさせて確認した)
 - [x] Step 3: 終了ステータスを分解する(正常終了 / シグナルで死んだ)
-- [ ] Step 4: 時間内に終わらなければ子を殺す(`alarm` + `SIGALRM` ハンドラ + `kill`) ← 作業中(2026-09-14)
-      - [x] `MYRUN_TIMEOUT=2 myrun sleep 10` → SIGTERM で殺して `$?`=143。タイムアウト前の出力も回収できる
-      - [x] 6秒問題の原因を特定: 孫の `sleep` が書き口を握っている(上の「分かったこと」参照)
-      - [ ] **次はここ**: プロセスグループで群れごと殺す。子で `setpgid(Pid::from_raw(0), Pid::from_raw(0))`
-            (`fork` 後・`exec` 前)、親は `kill` を `killpg(child, SIGTERM)` に変える。
-            確認: `time (MYRUN_TIMEOUT=2 myrun sh -c 'echo partial; sleep 10')` が 2 秒で戻ること、
-            `strace -f -e trace=kill` で `kill(-<pid>, SIGTERM)` と負の PID が出ること
-      - [ ] SIGTERM を無視する子(`sh -c 'trap "" TERM; sleep 10'`)への SIGKILL エスカレーション
-- [ ] Step 5: `strace -f` で観察する
-- [ ] `docs/glossary.md` に追加する: プロセス / `fork` / `exec` / 終了コード / async-signal-safe / ABI / パイプ / EOF / シグナル / コアダンプ / async-signal-safe と Atomic / プロセスグループ
+- [x] Step 4: 時間内に終わらなければ子を殺す(`alarm` + SIGALRM ハンドラ + `killpg`、SIGTERM→SIGKILL の2段階)
+- [ ] Step 5: `strace -f` で観察する ← 次はここ
+      - `MYRUN_TIMEOUT=2 strace -f -y -o /tmp/myrun.strace ./target/debug/myrun sh -c 'echo hi; sleep 10'` を取り、
+        出てくる syscall を **自分のコードのどの行に対応するか** 表にする(このノートに書く)
+      - 見どころ: `pipe2` / `clone`(fork の正体) / `dup2` / `setpgid` / `execve` / `rt_sigaction`(sigaction の正体) /
+        `alarm` / `read` が `EINTR` で戻る瞬間 / `kill` の負の PID / `wait4`(waitpid の正体)
+      - `std::process::Command` で同じことをしたら何が違うか(`posix_spawn` / `clone3` / `CLONE_VFORK`)は余裕があれば
+- [ ] `docs/glossary.md` に追加する: プロセス / `fork` / `exec` / 終了コード / async-signal-safe / ABI / パイプ / EOF / シグナル / コアダンプ / async-signal-safe と Atomic / プロセスグループ / SIGTERM と SIGKILL
 
 ### Phase -1 の残り(この演習以外)
 

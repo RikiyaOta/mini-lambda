@@ -2,7 +2,7 @@ use nix::errno::Errno;
 use nix::libc::_exit;
 use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, killpg, sigaction};
 use nix::sys::wait::{WaitStatus, waitpid};
-use nix::unistd::alarm::set;
+use nix::unistd::alarm::{cancel, set};
 use nix::unistd::{ForkResult, Pid, dup2_stdout, execvp, fork, pipe, setpgid};
 use std::env::VarError;
 use std::ffi::CString;
@@ -97,6 +97,9 @@ fn main() -> nix::Result<()> {
                     let mut buf = [0u8; 8192]; // バッファサイズは固定しておく。
                     let mut n = 0;
                     let mut bytes = Vec::new();
+
+                    let mut is_first_sigalarm_triggered = false;
+
                     loop {
                         // `waitpid` の前に `read` する必要がある。
                         // なぜか？
@@ -121,6 +124,11 @@ fn main() -> nix::Result<()> {
                                     n,
                                     String::from_utf8_lossy(&bytes[..n]).escape_debug()
                                 );
+
+                                // タイムアウト時の最初の SIGTERM で子プロセスが素直に死んだ場合、
+                                // SIGKILL を送るようのアラームが残ったままになるので、EOF がきたタイミングで `cancel()` を実行しておく。
+                                cancel();
+
                                 break;
                             }
                             ReadResult::Success(m) => {
@@ -131,14 +139,29 @@ fn main() -> nix::Result<()> {
                                 bytes.extend_from_slice(&buf[..m]);
                             }
                             ReadResult::Timeout => {
-                                // 子プロセスのタイムアウトになった。
-                                // タイムアウトになった旨のログ出力と、子プロセスの kill を実施する。
-                                println!(
-                                    "[myrun] timeout ({}s), sending SIGTERM to pid={}",
-                                    get_timeout().unwrap(), // Timeout になる場合はタイムアウトは指定されているはずなので、Noneになることは想定されない。
-                                    child
-                                );
-                                killpg(child, Signal::SIGTERM)?;
+                                if !is_first_sigalarm_triggered {
+                                    // 子プロセスのタイムアウトになった。
+                                    // タイムアウトになった旨のログ出力と、子プロセスの kill を実施する。
+                                    println!(
+                                        "[myrun] timeout ({}s), sending SIGTERM to pid={}",
+                                        get_timeout().unwrap(), // Timeout になる場合はタイムアウトは指定されているはずなので、Noneになることは想定されない。
+                                        child
+                                    );
+                                    killpg(child, Signal::SIGTERM)?;
+                                    is_first_sigalarm_triggered = true;
+
+                                    // SIGKILL までの猶予を set しないといけない。
+                                    // false に戻しておかないと、SIGALARM以外の理由で read が EINTR を返した時にも Timeout になってしまう。
+                                    IS_SIGALARM_TRIGGERED.store(false, Ordering::Relaxed);
+                                    let _ = set(1); // 猶予の1秒は固定にする。
+                                } else {
+                                    // すでに SIGTERM を送ったが、まだ子プロセスが生きていた場合に受け取った SIGALARM.
+                                    // 今度は SIGTERM ではなく、SIGKILL する。
+                                    println!(
+                                        "[myrun] still alive after 1s, sending SIGKILL to pid={child}"
+                                    );
+                                    killpg(child, Signal::SIGKILL)?;
+                                }
 
                                 // この後、以下2つを実施する必要がある:
                                 // 1. パイプの EOF まで読み切ること。
