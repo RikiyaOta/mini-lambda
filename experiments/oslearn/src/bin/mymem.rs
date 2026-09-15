@@ -15,30 +15,69 @@
 /// | ⑤ inode | ファイルの識別番号。**`0` はファイルに紐づいていない = 匿名マッピング** |
 /// | ⑥ パス | ファイル名、`[heap]` などの特殊領域、または**空欄**(匿名)
 fn main() {
-    print_total_mapping_size();
+    let mappings = read_mappings();
+    print_total_mapping_size(&mappings);
     print_vmsize_vmrss();
+    print_mappings(&mappings);
 }
 
-fn print_total_mapping_size() {
-    let total: u64 = std::fs::read_to_string("/proc/self/maps")
+/// `/proc/[pid]/maps` から読み取れるメモリのマッピングに対応する構造体.
+struct Mapping {
+    start: u64,
+    end: u64,
+    permissions: String,
+    path: Option<String>,
+}
+
+impl Mapping {
+    fn parse(line: &str) -> Mapping {
+        let mut line = line.split_whitespace();
+
+        // メモリ範囲のパース
+        let mut first_field = line.next().unwrap().split('-');
+        let start = u64::from_str_radix(first_field.next().unwrap(), 16).unwrap();
+        let end = u64::from_str_radix(first_field.next().unwrap(), 16).unwrap();
+
+        // 権限のパース
+        let permissions = line.next().unwrap().to_string();
+
+        // オフセット、デバイス、inode を飛ばす
+        line.next();
+        line.next();
+        line.next();
+
+        // path のパース
+        let path = line.next().map(|s| s.to_string());
+
+        Mapping {
+            start,
+            end,
+            permissions,
+            path,
+        }
+    }
+
+    fn size(&self) -> u64 {
+        self.end - self.start
+    }
+}
+
+/// `/proc/self/maps` を読んでパースする。
+fn read_mappings() -> Vec<Mapping> {
+    std::fs::read_to_string("/proc/self/maps")
         .unwrap()
         .split("\n")
         .filter(|line| !line.is_empty())
-        .map(|line| {
-            let mut first_field = line.split_whitespace().next().unwrap().split('-');
-            let left = first_field.next().unwrap(); // アドレス範囲の左
-            let right = first_field.next().unwrap(); // アドレス範囲の右
+        .map(Mapping::parse)
+        .collect()
+}
 
-            let left = u64::from_str_radix(left, 16).unwrap();
-            let right = u64::from_str_radix(right, 16).unwrap();
-
-            right - left
-        })
-        .sum();
+fn print_total_mapping_size(mappings: &[Mapping]) {
+    let total: u64 = mappings.iter().map(|m| m.size()).sum();
 
     // 注意: 1024バイト単位なら、`KiB` と書くのが今は正しい。
     //      が、昔からの慣習で、`/proc/*/status` に `kB` と書いてあるらしいので合わせた。
-    println!("全マッピングのサイズ合計={}kB", total / 1024);
+    println!("全マッピングのサイズ合計: {}kB", total / 1024);
 }
 
 /// `/proc/self/status` の VmSize(仮想サイズ) と VmRSS(物理に載っている分)だけ出力する.
@@ -52,4 +91,17 @@ fn print_vmsize_vmrss() {
                 println!("{line}");
             }
         });
+}
+
+fn print_mappings(mappings: &[Mapping]) {
+    for m in mappings {
+        println!(
+            "{:x}-{:x} {:>6} KiB {} {}",
+            m.start,
+            m.end,
+            m.size() / 1024,
+            m.permissions,
+            m.path.as_deref().unwrap_or("[匿名]")
+        );
+    }
 }

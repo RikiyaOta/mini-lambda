@@ -17,7 +17,8 @@
 - **仮想メモリ演習(`mymem`)を開始(2026-09-15)** — Phase -1 の最後の項目。全5ステップ
   (アドレス空間を見る → 遅延割り当て → CoW → 仮想/物理の変換 → `userfaultfd`)。
   Phase 3 の EPT と Phase 6 のスナップショットに直結するので飛ばさない。
-  **Step 1 進行中**(VSZ と RSS の差までは確認済み)。記録は `docs/notes/phase-minus1-memory.md`
+  **Step 1 進行中**(VSZ と RSS の差、全マッピングの一覧表示まで完了。残りは罠B→A→C)。
+  記録は `docs/notes/phase-minus1-memory.md`
 
 ---
 
