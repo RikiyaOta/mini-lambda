@@ -17,9 +17,9 @@
 - **仮想メモリ演習(`mymem`)を開始(2026-09-15)** — Phase -1 の最後の項目。全5ステップ
   (アドレス空間を見る → 遅延割り当て → CoW → 仮想/物理の変換 → `userfaultfd`)。
   Phase 3 の EPT と Phase 6 のスナップショットに直結するので飛ばさない。
-  **Step 1・2 完了(2026-09-20)** — ページ/ページテーブル/VMA/`brk` と `mmap`/アドレス空間レイアウト/
+  **Step 1〜3 完了(2026-09-20)** — ページ/ページテーブル/VMA/`brk` と `mmap`/アドレス空間レイアウト/
   ガードページ/ASLR、遅延割り当て(1GiB 予約で RSS +0、1ページ書込ごとに +4KiB)/共有ゼロページ/
-  `MADV_DONTNEED`。次は Step 3(大きなメモリを持ったまま `fork` = CoW)。
+  `MADV_DONTNEED`、CoW(`fork` 後の Shared/Private_Dirty の移動を実測)。次は Step 4(仮想→物理の変換を自分で引く)。
   記録は `docs/notes/phase-minus1-memory.md`
 
 ---

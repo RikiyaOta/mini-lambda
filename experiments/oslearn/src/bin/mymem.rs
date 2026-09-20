@@ -125,33 +125,40 @@ fn run_step3() {
 
         match fork() {
             Ok(Parent { child }) => {
-                let prefix = "[parent] ";
-                print_vmsize_vmrss(Some(prefix.to_string()));
-                print_smaps_rollup(Some(prefix.to_string()));
+                print_vmsize_vmrss(Some("[parent][waitpid前]".to_string()));
+                print_smaps_rollup(Some("[parent][waitpid前]".to_string()));
                 match waitpid(child, None).unwrap() {
                     WaitStatus::Exited(pid, status) => {
-                        println!("{prefix}pid={pid} exited with {status}");
+                        println!("[parent][waitpid後] pid={pid} exited with {status}");
+                        print_vmsize_vmrss(Some("[parent][waitpid後]".to_string()));
+                        print_smaps_rollup(Some("[parent][waitpid後]".to_string()));
                         exit(status);
                     }
                     _ => {
                         // exit 以外の分岐は今回は興味ないので雑に扱う。
-                        eprintln!("{prefix}子プロセスが exit 以外の理由で落ちました。");
+                        eprintln!("[parent][waitpid後] 子プロセスが exit 以外の理由で落ちました。");
                         exit(128);
                     }
                 }
             }
             Ok(Child) => {
-                let prefix = "[child] ";
+                // 今回は println! しか使っていない。改行あり。
+                // 改行ありの場合は、すぐ flush される。なので、exec なしだけど、気にせず stdout に出力していくことにする。
+                print_vmsize_vmrss(Some("[child][書き込み前]".to_string()));
+                print_smaps_rollup(Some("[child][書き込み前]".to_string()));
 
-                // 子プロセスで stdout への出力ってやっていいんだっけ？
-                // exec があったときは、exec の前にやっちゃダメと習った。
+                // 親と 1GiB の物理メモリを共有しているはず。
+                // 先頭1万ページに書き込みを実施してみる。
+                for i in 0..10000 {
+                    ptr::write(base.add(i * 4096), 1);
+                }
 
-                // 試しになにも考えずにやってみる。
-                // 動いたな。なんで問題ないのだろう？ fork 前に print してないから、flush されていない出力がないからなのかな？
-                print_vmsize_vmrss(Some(prefix.to_string()));
-                print_smaps_rollup(Some(prefix.to_string()));
+                print_vmsize_vmrss(Some("[child][書き込み後]".to_string()));
+                print_smaps_rollup(Some("[child][書き込み後]".to_string()));
 
-                // 今回は print するから後始末はして欲しいので、exit してみる。
+                // std::process::exit にしておく。
+                // 今回は問題ないが、Rust の stdout を flush してくれるのは std::process::exit なので。
+                // nix::libc::exit は C の `exit` なので、Rustのstdoutをflushしない。
                 exit(0);
             }
             Err(err) => {
