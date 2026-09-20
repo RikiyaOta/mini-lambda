@@ -1,5 +1,9 @@
 use nix::sys::mman::{MapFlags, ProtFlags, madvise, mmap_anonymous};
+use nix::sys::wait::{WaitStatus, waitpid};
+use nix::unistd::ForkResult::{Child, Parent};
+use nix::unistd::fork;
 use std::num::NonZeroUsize;
+use std::process::exit;
 use std::ptr;
 
 /// 自分自身のメモリ地図を人間が読める形で表示するコマンド
@@ -19,9 +23,25 @@ use std::ptr;
 /// | ⑤ inode | ファイルの識別番号。**`0` はファイルに紐づいていない = 匿名マッピング** |
 /// | ⑥ パス | ファイル名、`[heap]` などの特殊領域、または**空欄**(匿名)
 fn main() {
+    match std::env::args().nth(1).as_deref() {
+        Some("step2") => run_step2(),
+        Some("step3") => run_step3(),
+        other => {
+            println!(
+                "[Fallback] 引数で明示された step が無効({other:?})なため、step2 を実行します。"
+            );
+            run_step2();
+        }
+    }
+}
+
+/// Step2 での実装
+///
+/// maps を確認し、mmap での確保や読み書きの挙動を確認した。
+fn run_step2() {
     let mappings = read_mappings();
     print_total_mapping_size(&mappings);
-    print_vmsize_vmrss();
+    print_vmsize_vmrss(None);
     print_mappings(&mappings);
 
     println!("----- mmap 開始 -----");
@@ -39,7 +59,7 @@ fn main() {
         println!("mmap_anonymous の返した値: {:?}", addr);
 
         // 確保してまだ書き込んでいない時の VmRSS を確認する。
-        print_vmsize_vmrss();
+        print_vmsize_vmrss(None);
 
         // 1ページずつ書き込んでみる。
         let page_count = (1 << 30) / 4096; // 1 GiB / 4 KiB
@@ -54,7 +74,7 @@ fn main() {
             // 定期的に VmRSS を確認する。
             if i + 1 == 100 || i + 1 == 1000 || i + 1 == 10000 {
                 println!("----- {} ページ書き込み完了 -----", i + 1);
-                print_vmsize_vmrss();
+                print_vmsize_vmrss(None);
             }
 
             if i + 1 == 10000 {
@@ -68,7 +88,7 @@ fn main() {
 
                 // 物理メモリを返却したので、VmRSS が最初の値と一致するはず。
                 // VmSize は予約したサイズなので、それは変わらないはず。
-                print_vmsize_vmrss();
+                print_vmsize_vmrss(None);
 
                 // 返却した範囲をもう意図度読み込んだらどうなる？→予約はしたままなので、ゼロページが読み込まれるのでは？
                 let result = ptr::read(base.add(i * 4096));
@@ -81,8 +101,65 @@ fn main() {
 
     let mappings = read_mappings();
     print_total_mapping_size(&mappings);
-    print_vmsize_vmrss();
+    print_vmsize_vmrss(None);
     print_mappings(&mappings);
+}
+
+fn run_step3() {
+    unsafe {
+        // 1GiB を確保する。
+        let addr = mmap_anonymous(
+            None,
+            NonZeroUsize::new(1 << 30).unwrap(),
+            ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+            MapFlags::MAP_PRIVATE,
+        )
+        .unwrap();
+
+        // 全ページに書き込む(ループ以外での書き方あるのかな？？？)
+        let page_count = (1 << 30) / 4096;
+        let base: *mut u8 = addr.as_ptr().cast();
+        for i in 0..page_count {
+            ptr::write(base.add(i * 4096), 1);
+        }
+
+        match fork() {
+            Ok(Parent { child }) => {
+                let prefix = "[parent] ";
+                print_vmsize_vmrss(Some(prefix.to_string()));
+                print_smaps_rollup(Some(prefix.to_string()));
+                match waitpid(child, None).unwrap() {
+                    WaitStatus::Exited(pid, status) => {
+                        println!("{prefix}pid={pid} exited with {status}");
+                        exit(status);
+                    }
+                    _ => {
+                        // exit 以外の分岐は今回は興味ないので雑に扱う。
+                        eprintln!("{prefix}子プロセスが exit 以外の理由で落ちました。");
+                        exit(128);
+                    }
+                }
+            }
+            Ok(Child) => {
+                let prefix = "[child] ";
+
+                // 子プロセスで stdout への出力ってやっていいんだっけ？
+                // exec があったときは、exec の前にやっちゃダメと習った。
+
+                // 試しになにも考えずにやってみる。
+                // 動いたな。なんで問題ないのだろう？ fork 前に print してないから、flush されていない出力がないからなのかな？
+                print_vmsize_vmrss(Some(prefix.to_string()));
+                print_smaps_rollup(Some(prefix.to_string()));
+
+                // 今回は print するから後始末はして欲しいので、exit してみる。
+                exit(0);
+            }
+            Err(err) => {
+                eprintln!("[Error] fork に失敗しました: {err}");
+                exit(1);
+            }
+        }
+    }
 }
 
 /// `/proc/[pid]/maps` から読み取れるメモリのマッピングに対応する構造体.
@@ -145,16 +222,41 @@ fn print_total_mapping_size(mappings: &[Mapping]) {
 }
 
 /// `/proc/self/status` の VmSize(仮想サイズ) と VmRSS(物理に載っている分)だけ出力する.
-fn print_vmsize_vmrss() {
+fn print_vmsize_vmrss(prefix: Option<String>) {
+    let prefix = prefix.unwrap_or("".to_string());
     std::fs::read_to_string("/proc/self/status")
         .unwrap()
         .split("\n")
         .filter(|line| !line.is_empty())
         .for_each(|line| {
             if line.starts_with("VmSize:") || line.starts_with("VmRSS:") {
-                println!("{line}");
+                println!("{prefix}{line}");
             }
         });
+}
+
+/// `/proc/self/smaps_rollup` の以下の行だけ出力する:
+///
+/// - Shared_Clean
+/// - Shared_Dirty
+/// - Private_Clean
+/// - Private_Dirty
+fn print_smaps_rollup(prefix: Option<String>) {
+    let prefix = prefix.unwrap_or("".to_string());
+    std::fs::read_to_string("/proc/self/smaps_rollup")
+        .unwrap()
+        .split("\n")
+        .filter(|line| !line.is_empty())
+        .for_each(|line| {
+            if line.starts_with("Shared_Clean:")
+                || line.starts_with("Shared_Dirty:")
+                || line.starts_with("Private_Clean:")
+                || line.starts_with("Private_Dirty:")
+                || line.starts_with("Pss:")
+            {
+                println!("{prefix}{line}");
+            }
+        })
 }
 
 fn print_mappings(mappings: &[Mapping]) {
