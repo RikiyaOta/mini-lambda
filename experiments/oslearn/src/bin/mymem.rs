@@ -1,3 +1,7 @@
+use nix::sys::mman::{MapFlags, ProtFlags, madvise, mmap_anonymous};
+use std::num::NonZeroUsize;
+use std::ptr;
+
 /// 自分自身のメモリ地図を人間が読める形で表示するコマンド
 ///
 /// /proc/self/maps は以下のようなデータが1行ずつ並んでいる。
@@ -15,6 +19,66 @@
 /// | ⑤ inode | ファイルの識別番号。**`0` はファイルに紐づいていない = 匿名マッピング** |
 /// | ⑥ パス | ファイル名、`[heap]` などの特殊領域、または**空欄**(匿名)
 fn main() {
+    let mappings = read_mappings();
+    print_total_mapping_size(&mappings);
+    print_vmsize_vmrss();
+    print_mappings(&mappings);
+
+    println!("----- mmap 開始 -----");
+
+    // Step2: 1 GiB を確保だけする。触らない。
+    // Step3: 実際に書き込んでみる。
+    unsafe {
+        let addr = mmap_anonymous(
+            None,
+            NonZeroUsize::new(1 << 30).unwrap(),
+            ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+            MapFlags::MAP_PRIVATE,
+        )
+        .unwrap();
+        println!("mmap_anonymous の返した値: {:?}", addr);
+
+        // 確保してまだ書き込んでいない時の VmRSS を確認する。
+        print_vmsize_vmrss();
+
+        // 1ページずつ書き込んでみる。
+        let page_count = (1 << 30) / 4096; // 1 GiB / 4 KiB
+        let base: *mut u8 = addr.as_ptr().cast(); // `c_void` は型がわからないメモリを表すので、変換が必要。
+        for i in 0..page_count {
+            // 1ページずつ書き込んでみる。以下は、u8 単位、つまり1Bだけ書き込んでる。
+            ptr::write(base.add(i * 4096), 1);
+
+            // 1ページずつ読み込んでみる方も見てみると、「ゼロページ」が使われるケースをみれるので面白い。
+            // ptr::read(base.add(i * 4096));
+
+            // 定期的に VmRSS を確認する。
+            if i + 1 == 100 || i + 1 == 1000 || i + 1 == 10000 {
+                println!("----- {} ページ書き込み完了 -----", i + 1);
+                print_vmsize_vmrss();
+            }
+
+            if i + 1 == 10000 {
+                println!("---- 物理メモリを返却する ----");
+                madvise(
+                    addr,
+                    4096 * (i + 1), // ここまで書き込んだアドレス範囲
+                    nix::sys::mman::MmapAdvise::MADV_DONTNEED,
+                )
+                .unwrap();
+
+                // 物理メモリを返却したので、VmRSS が最初の値と一致するはず。
+                // VmSize は予約したサイズなので、それは変わらないはず。
+                print_vmsize_vmrss();
+
+                // 返却した範囲をもう意図度読み込んだらどうなる？→予約はしたままなので、ゼロページが読み込まれるのでは？
+                let result = ptr::read(base.add(i * 4096));
+                println!("返却した 10000 ページ目を読み込んだ結果: {result}");
+            }
+        }
+    }
+
+    println!("----- mmap 完了 -----");
+
     let mappings = read_mappings();
     print_total_mapping_size(&mappings);
     print_vmsize_vmrss();
@@ -96,7 +160,7 @@ fn print_vmsize_vmrss() {
 fn print_mappings(mappings: &[Mapping]) {
     for m in mappings {
         println!(
-            "{:x}-{:x} {:>6} KiB {} {}",
+            "{:x}-{:x} {:>8} KiB {} {}",
             m.start,
             m.end,
             m.size() / 1024,
