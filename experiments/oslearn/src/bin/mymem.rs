@@ -174,7 +174,7 @@ fn run_step3() {
 
 fn run_step4() {
     unsafe {
-        // 実験として、適当に mmap する。
+        // mmap しておき、書き込んで私有ページにしておく.
         let addr = mmap_anonymous(
             None,
             NonZeroUsize::new(1 << 30).unwrap(),
@@ -182,22 +182,47 @@ fn run_step4() {
             MapFlags::MAP_PRIVATE,
         )
         .unwrap();
-
-        // 触る前のエントリーを出力
-        let entry = pagemap_entry(addr.as_ptr() as usize);
-        println!("触る前: {:?}", entry);
-
-        // 読み込んだ後のエントリーを出力
-        let base: *mut u8 = addr.as_ptr().cast();
-        ptr::read(base);
-        let entry = pagemap_entry(addr.as_ptr() as usize);
-        println!("読んだ後: {:?}", entry);
-
-        // 書き込んだ後のエントリーを出力
         let base: *mut u8 = addr.as_ptr().cast();
         ptr::write(base, 1);
         let entry = pagemap_entry(addr.as_ptr() as usize);
-        println!("書いた後: {:?}", entry);
+        println!("fork 前: {:?}", entry);
+
+        match fork() {
+            Ok(Parent { child }) => {
+                let entry = pagemap_entry(addr.as_ptr() as usize);
+                println!("[親] waitpid 前: {:?}", entry);
+
+                match waitpid(child, None).unwrap() {
+                    WaitStatus::Exited(_pid, _status) => {
+                        let entry = pagemap_entry(addr.as_ptr() as usize);
+                        println!("[親] waitpid 後(子がexitした後): {:?}", entry);
+                        exit(0);
+                    }
+                    _ => {
+                        // exit 以外の分岐は今回は興味ないので雑に扱う。
+                        eprintln!("[parent][waitpid後] 子プロセスが exit 以外の理由で落ちました。");
+                        exit(128);
+                    }
+                }
+            }
+            Ok(Child) => {
+                let entry = pagemap_entry(addr.as_ptr() as usize);
+                println!("[子] 書き込み前: {:?}", entry);
+
+                // 子で書き込んでみる.
+                ptr::write(base, 1);
+
+                // 書き込んだ後にどうなるか？
+                let entry = pagemap_entry(addr.as_ptr() as usize);
+                println!("[子] 書き込み後: {:?}", entry);
+
+                exit(0);
+            }
+            Err(err) => {
+                eprintln!("[Error] fork に失敗しました: {err}");
+                exit(1);
+            }
+        }
     }
 }
 
