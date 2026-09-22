@@ -19,7 +19,8 @@
   Phase 3 の EPT と Phase 6 のスナップショットに直結するので飛ばさない。
   **Step 1〜3 完了(2026-09-20)** — ページ/ページテーブル/VMA/`brk` と `mmap`/アドレス空間レイアウト/
   ガードページ/ASLR、遅延割り当て(1GiB 予約で RSS +0、1ページ書込ごとに +4KiB)/共有ゼロページ/
-  `MADV_DONTNEED`、CoW(`fork` 後の Shared/Private_Dirty の移動を実測)。次は Step 4(仮想→物理の変換を自分で引く)。
+  `MADV_DONTNEED`、CoW(`fork` 後の Shared/Private_Dirty の移動を実測)。
+  **Step 4 着手**(`/proc/self/pagemap` で仮想→物理を自分で引く。4-1 の手順はノートにある。要 `sudo`)。
   記録は `docs/notes/phase-minus1-memory.md`
 
 ---

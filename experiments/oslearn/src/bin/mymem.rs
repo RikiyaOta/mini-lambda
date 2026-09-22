@@ -2,6 +2,8 @@ use nix::sys::mman::{MapFlags, ProtFlags, madvise, mmap_anonymous};
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::ForkResult::{Child, Parent};
 use nix::unistd::fork;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::num::NonZeroUsize;
 use std::process::exit;
 use std::ptr;
@@ -26,6 +28,7 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("step2") => run_step2(),
         Some("step3") => run_step3(),
+        Some("step4") => run_step4(),
         other => {
             println!(
                 "[Fallback] 引数で明示された step が無効({other:?})なため、step2 を実行します。"
@@ -167,6 +170,84 @@ fn run_step3() {
             }
         }
     }
+}
+
+fn run_step4() {
+    unsafe {
+        // 実験として、適当に mmap する。
+        let addr = mmap_anonymous(
+            None,
+            NonZeroUsize::new(1 << 30).unwrap(),
+            ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+            MapFlags::MAP_PRIVATE,
+        )
+        .unwrap();
+
+        // 触る前のエントリーを出力
+        let entry = pagemap_entry(addr.as_ptr() as usize);
+        println!("触る前: {:?}", entry);
+
+        // 読み込んだ後のエントリーを出力
+        let base: *mut u8 = addr.as_ptr().cast();
+        ptr::read(base);
+        let entry = pagemap_entry(addr.as_ptr() as usize);
+        println!("読んだ後: {:?}", entry);
+
+        // 書き込んだ後のエントリーを出力
+        let base: *mut u8 = addr.as_ptr().cast();
+        ptr::write(base, 1);
+        let entry = pagemap_entry(addr.as_ptr() as usize);
+        println!("書いた後: {:?}", entry);
+    }
+}
+
+/// 指定された仮想アドレスが属するページに対応する `/proc/self/pagemap` の情報を返す。
+///
+/// pagemap の中身は以下のような、`u64`が仮想ページ番号順にぎっしり並んだものと思って良い。
+/// `Vec<u64>` の添え字が仮想ページ番号に対応する感じ。
+///
+/// ```
+/// [ページ0の情報][ページ1の情報][ページ2の情報][ページ3の情報] ...
+/// ←─ 8 バイト ─→←─ 8 バイト ─→←─ 8 バイト ─→
+/// バイト位置: 0            8            16           24
+/// ```
+fn pagemap_entry(virt_addr: usize) -> PagemapEntry {
+    let mut f =
+        File::open("/proc/self/pagemap").expect("/proc/self/pagemap の open に失敗しました。");
+    let _ = f
+        // virt_addr / 4096 --> 4096B = 4KiB はページの大きさなので、4096で割って、仮想ページ番号を算出している。
+        // （16進数表示で 4096 = 0x1000 なので、virt_addr の16進数での末尾3桁を落としている）
+        // あとは pagemap が巨大な u64 (=8B) の配列だと思えば、仮想ページ番号 * 8 をすれば、その位置までシークできる。
+        .seek(SeekFrom::Start((virt_addr / 4096 * 8) as u64))
+        .unwrap();
+
+    let mut buf = [0u8; 8]; // 8Bだけ読み込む
+    f.read_exact(&mut buf).unwrap();
+
+    let entry = u64::from_le_bytes(buf);
+
+    let present = (entry >> 63) & 1 == 1; // 63ビット目を取り出す
+    let pfn = entry & ((1u64 << 55) - 1); // 下位55ビットを取り出す((1u64<<55)-1は2進数で1が55個並んだ数)
+
+    PagemapEntry { present, pfn }
+}
+
+/// `/proc/self/pagemap` の各エントリー（8バイト）に詰め込まれている情報に対応する構造体
+#[derive(Debug)]
+struct PagemapEntry {
+    /// 63ビット目。
+    ///
+    /// この仮想ページに今この瞬間、物理ページが結びついているか。
+    ///
+    /// - false: VMA(予約)はあるがまだ実物なし。
+    /// - true: 実物がある。つまり、ページテーブル（CPUが見るやつ）に行がある。
+    present: bool,
+
+    /// 下位55ビット。
+    ///
+    /// 物理ページ番号。
+    /// `pfn * 4096(=4KiB)` が物理アドレスになる。
+    pfn: u64,
 }
 
 /// `/proc/[pid]/maps` から読み取れるメモリのマッピングに対応する構造体.
