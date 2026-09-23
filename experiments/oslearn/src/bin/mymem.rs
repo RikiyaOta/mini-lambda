@@ -2,11 +2,13 @@ use nix::sys::mman::{MapFlags, ProtFlags, madvise, mmap_anonymous};
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::ForkResult::{Child, Parent};
 use nix::unistd::fork;
+use std::ffi::c_void;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::num::NonZeroUsize;
 use std::process::exit;
 use std::ptr;
+use userfaultfd::{Event, UffdBuilder};
 
 /// 自分自身のメモリ地図を人間が読める形で表示するコマンド
 ///
@@ -29,6 +31,7 @@ fn main() {
         Some("step2") => run_step2(),
         Some("step3") => run_step3(),
         Some("step4") => run_step4(),
+        Some("step5") => run_step5(),
         other => {
             println!(
                 "[Fallback] 引数で明示された step が無効({other:?})なため、step2 を実行します。"
@@ -222,6 +225,94 @@ fn run_step4() {
                 eprintln!("[Error] fork に失敗しました: {err}");
                 exit(1);
             }
+        }
+    }
+}
+
+fn run_step5() {
+    unsafe {
+        // 4ページほど適当に mmap して予約しておく。
+        // ※4ページ = 4KiB * 4 = 16KiB = 2^14 B
+        let length = 1 << 14;
+        let start_addr = mmap_anonymous(
+            None,
+            NonZeroUsize::new(length).unwrap(),
+            ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+            MapFlags::MAP_PRIVATE,
+        )
+        .unwrap();
+
+        println!("[main thread] start_addr={:?}", start_addr);
+
+        // `NonNull<c_void>` は `Send` を実装していないので、スレッドを跨げない。
+        // なので `usize` に変換しておく。
+        let start = start_addr.as_ptr() as usize;
+
+        let uffd = UffdBuilder::new().user_mode_only(true).create().unwrap();
+        let _ioctl_flag = uffd.register(start_addr.as_ptr(), length).unwrap();
+
+        std::thread::spawn(move || {
+            loop {
+                match uffd.read_event().unwrap() {
+                    Some(event) => match event {
+                        Event::Pagefault { kind, rw, addr } => {
+                            // 自分で確保した4ページのうち、どのページなのかを算出する。
+                            // そのために、最初に確保した時のアドレスとの差からページ番号(1,2,3,4)を算出する。
+                            // 注意：イベントで渡される addr はページ境界とは限らない！
+                            let diff = addr as usize - start;
+                            let page_num = (diff / 4096) + 1;
+                            println!(
+                                "[another thread] ページフォルト発生(page_num={}): {:?}, {:?}, {:?}",
+                                page_num, kind, rw, addr
+                            );
+
+                            // そのページ番号でうめた4096バイト(4KiB)を `copy` で流し込む.
+                            //
+                            // write だと、このスレッド(ハンドラ)自身がページフォルトを起こす。
+                            // カーネルはハンドラスレッドを眠らせて uffd にイベント送るが、
+                            // ハンドラが眠っているので応答する人がいないため、永遠に待つことになる。
+                            // なので以下のコードだとダメ。止まってしまうことまで確認した。
+                            //
+                            // ```
+                            // ptr::write(base, [page_num as u8; 4096]);
+                            // ```
+                            //
+                            // 代わりに `copy` を使う
+                            let buf = [page_num as u8; 4096];
+                            let src = buf.as_ptr() as *const c_void;
+                            let dst = (start + (page_num - 1) * 4096) as *mut c_void;
+                            uffd.copy(src, dst, 4096, true).unwrap();
+                        }
+                        other => {
+                            println!(
+                                "[another thread] ページフォルト以外のイベント検知: {:?}",
+                                other
+                            );
+                        }
+                    },
+                    None => {
+                        // non_block = true の時、まだ読み込みがまだできない時は None になるらしい。
+                        // Non Block がなにを意味しているかわかっていない。。。
+                        // 今回は、デフォルトの non_block = false で実行しているので、特になにもしない。
+                        // ログだけ出しておこう。念の為。
+                        println!("[anather thread][WARN] uffd.read_event() で None が返りました。");
+                    }
+                }
+            }
+        });
+
+        // メインスレッドでは、各ページの先頭1Bを読む（書かない）
+        // 読んだ値を表示する。
+        let base: *mut u8 = start_addr.as_ptr().cast();
+        for i in 0..=3 {
+            let result = ptr::read(base.add(i * 4096));
+            println!("[main thread] result={result}");
+
+            // 同じページを2回読んで実験してみる。
+            // すでに上の read でページフォルトを起こしたので、この下の read では
+            // ページフォルトは発生しないと予想できる。
+            let result = ptr::read(base.add(i * 4096));
+            println!("[main thread] 2回目 result={result}");
         }
     }
 }
