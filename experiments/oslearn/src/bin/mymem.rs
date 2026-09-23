@@ -31,7 +31,8 @@ fn main() {
         Some("step2") => run_step2(),
         Some("step3") => run_step3(),
         Some("step4") => run_step4(),
-        Some("step5") => run_step5(),
+        Some("step5-1") => run_step5_1(),
+        Some("step5-2") => run_step5_2(),
         other => {
             println!(
                 "[Fallback] 引数で明示された step が無効({other:?})なため、step2 を実行します。"
@@ -229,7 +230,7 @@ fn run_step4() {
     }
 }
 
-fn run_step5() {
+fn run_step5_1() {
     unsafe {
         // 4ページほど適当に mmap して予約しておく。
         // ※4ページ = 4KiB * 4 = 16KiB = 2^14 B
@@ -314,6 +315,86 @@ fn run_step5() {
             let result = ptr::read(base.add(i * 4096));
             println!("[main thread] 2回目 result={result}");
         }
+    }
+}
+
+fn run_step5_2() {
+    unsafe {
+        // 200ページ = 4KiB * 200 = 819200 バイトを予約して register する（step5-1と同じ）.
+        let length = (1 << 10) * 4 * 200;
+        let start_addr = mmap_anonymous(
+            None,
+            NonZeroUsize::new(length).unwrap(),
+            ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+            MapFlags::MAP_PRIVATE,
+        )
+        .unwrap();
+
+        print_vmsize_vmrss(Some("[main thread] ".to_string()));
+        println!("[main thread] start_addr={:?}", start_addr);
+
+        let start = start_addr.as_ptr() as usize;
+
+        let uffd = UffdBuilder::new().user_mode_only(true).create().unwrap();
+        let _ioctl_flag = uffd.register(start_addr.as_ptr(), length).unwrap();
+
+        // ハンドラスレッドでは、スナップショットファイルを開いておき、
+        // フォルトが来たら、ページ番号のファイルのオフセットを計算し、そこから4096B読んで、
+        // それを `copy` の src にする。読み込んだページ数を数えて、その都度表示する。
+        std::thread::spawn(move || {
+            let mut read_page_count = 0;
+            let mut f = File::open("/tmp/snapshot.bin").unwrap();
+            loop {
+                match uffd.read_event().unwrap() {
+                    Some(Event::Pagefault { kind, rw, addr }) => {
+                        read_page_count += 1;
+                        let i = (addr as usize - start) / 4096;
+
+                        let mut buf = [0u8; 4096];
+                        f.seek(SeekFrom::Start((i * 4096) as u64)).unwrap(); // ここはメモリの位置でなく、ファイルの位置であることに注意。
+                        f.read_exact(&mut buf).unwrap();
+
+                        let dst = (start + i * 4096) as *mut c_void;
+
+                        uffd.copy(buf.as_ptr() as *const c_void, dst, 4096, true)
+                            .unwrap();
+
+                        println!(
+                            "[Handler Thread] Pagefault! (i={i})(読み込んだページ数={read_page_count}): {:?}, {:?}, {:?}",
+                            kind, rw, addr
+                        );
+                    }
+                    other => {
+                        println!(
+                            "[Handler Thread] Pagefault 以外のイベントを検知しました: {:?}",
+                            other
+                        );
+                    }
+                }
+            }
+        });
+
+        // メインスレッドでは一部のページだけを読む
+        // ここでは、適当に、10ページおきに20ページだけ読むことにする。
+        let base: *mut u8 = start_addr.as_ptr().cast();
+        for i in 0..20 {
+            let page_i = i * 10; // 0, 10, 20, 30, ...
+            let page_num = page_i + 1; // 1, 11, 21, 31, ...
+
+            // 一部のページで、先に書いてから読み直してみる。
+            if i == 4 {
+                ptr::write(base.add(page_i * 4096), 255);
+
+                let first_byte = ptr::read(base.add(page_i * 4096));
+                let second_byte = ptr::read(base.add(page_i * 4096 + 1));
+                println!("[main thread] first_byte={first_byte}, second_byte={second_byte}");
+            }
+
+            let result = ptr::read(base.add(page_i * 4096));
+            println!("[main thread] page_num={page_num}, result={result}");
+        }
+
+        print_vmsize_vmrss(Some("[main thread] ".to_string()));
     }
 }
 
