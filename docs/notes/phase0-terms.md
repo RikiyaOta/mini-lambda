@@ -21,7 +21,7 @@ Phase -1 の用語は全部自分で書いたので、ここも項目ごとに�
 | 3   | VM entry と VM exit、trap-and-emulate                                                 | ✅ 09-26      |
 | 4   | EPT(2段階アドレス変換)、guest physical / host virtual の対応関係                      | -             |
 | 5   | 完全仮想化 と 準仮想化(virtio)                                                        | -             |
-| 6   | KVM(カーネル側: CPU とメモリ)と VMM(ユーザー空間: デバイス)の責務分担 ★               | -             |
+| 6   | KVM(カーネル側: CPU とメモリ)と VMM(ユーザー空間: デバイス)の責務分担 ★               | ✅ 09-26      |
 | 7   | vCPU が「ゲストの CPU 役を務めている時間帯のホストのスレッド」であること              | -             |
 
 順番は 2 から始める(3・6・7 の土台になるため)。4 は Phase -1 の最後の欄でほぼ書けている。
@@ -144,13 +144,118 @@ I/O ポート別(上位):
 
 ---
 
+## 6. KVM と VMM の責務分担 ★
+
+### 観察 (2026-09-26、vmm-dev 上)
+
+項目 3 と同じゲスト起動を、今度は QEMU 側から見た。
+
+**(a) QEMU が KVM に出したお願い(`ioctl`)**
+
+```sh
+sudo strace -f -e trace=ioctl,openat -o /tmp/qemu.strace timeout 8 qemu-system-x86_64 -enable-kvm -m 512 \
+    -kernel /boot/vmlinuz -append "console=ttyS0 panic=-1" -nographic -no-reboot > /tmp/qemu2.out 2>&1
+grep -o 'KVM_[A-Z0-9_]*' /tmp/qemu.strace | sort | uniq -c | sort -rn
+```
+
+最初の方(準備):
+
+```
+8377  openat(AT_FDCWD, "/dev/kvm", O_RDWR|O_CLOEXEC) = 3
+8377  ioctl(3, KVM_CREATE_VM, 0)        = 8       ← VM を1つ作る(fd 8 が VM)
+8380  ioctl(8, KVM_CREATE_VCPU, 0)      = 9       ← vCPU を1つ作る(fd 9)。スレッド 8380 が呼んでいる
+8377  ioctl(8, KVM_SET_USER_MEMORY_REGION, {slot=0, flags=0, guest_phys_addr=0,
+          memory_size=536870912, userspace_addr=0x7e484ae00000}) = 0
+```
+
+回数の多いもの:
+
+| ioctl                                                                       | 回数   |
+| --------------------------------------------------------------------------- | ------ |
+| KVM_IRQ_LINE_STATUS                                                         | 92,814 |
+| KVM_RUN                                                                     | 59,074 |
+| KVM_SET_USER_MEMORY_REGION                                                  | 88     |
+| KVM_CHECK_EXTENSION                                                         | 72     |
+| ...(KVM_SET_REGS / KVM_SET_SREGS2 / KVM_GET_SUPPORTED_CPUID などは数回ずつ) |        |
+
+(strace で遅くなっているので、回数は (b) とは一致しない)
+
+**(a') vCPU を作った直後(`-e trace=ioctl,mmap` で再実行)**
+
+```
+9410  ioctl(8, KVM_CREATE_VCPU, 0)      = 9
+9410  ioctl(3, KVM_GET_VCPU_MMAP_SIZE, 0) = 12288
+9410  mmap(NULL, 12288, PROT_READ|PROT_WRITE, MAP_SHARED, 9, 0) = 0x7b0c14427000   ← vCPU の fd を mmap
+9410  ioctl(9, KVM_RUN, 0)              = 0      ← 同じスレッド 9410 が KVM_RUN を回す
+```
+
+- VM を作る = カーネルの中に「この VM の台帳」(メモリの対応表、vCPU の一覧など)ができるだけ。まだ何も走らない
+- vCPU を作る = カーネルの中に「ゲストの CPU 1個分の**状態を入れる箱**」(レジスタの保存場所、CPU への見張り設定)ができるだけ。これもまだ走らない
+- vCPU の fd を `mmap(MAP_SHARED)` した 12 KiB は、KVM と QEMU の**共有の連絡板**(`struct kvm_run`)。
+  `KVM_RUN` から戻ったとき、QEMU はここを読んで「exit の理由 = I/O、ポート 0x3f8、書かれた値 'A'」を知る
+
+**(b) VM exit のうち、QEMU まで戻ったもの**
+
+```sh
+sudo perf stat -e kvm:kvm_exit,kvm:kvm_userspace_exit,kvm:kvm_pio -a -- timeout 8 qemu-system-x86_64 ...(同じ)
+```
+
+| イベント               | 回数   | 意味                                      |
+| ---------------------- | ------ | ----------------------------------------- |
+| kvm:kvm_exit           | 90,544 | VM exit の総数                            |
+| kvm:kvm_userspace_exit | 75,176 | そのうち `KVM_RUN` から QEMU に戻ったもの |
+| kvm:kvm_pio            | 71,866 | I/O ポート命令による exit                 |
+
+→ 残りの約 15,000 回は KVM の中だけで片付いて、QEMU は気づいていない。
+(この起動はシリアル出力ばかりなので QEMU に戻る割合が異常に高い。普通の負荷ではもっと低い)
+
+### 自分の言葉で
+
+<!-- 手がかり:
+     - 表を作るとよい: 「KVM(カーネル)がやること」「VMM(ユーザー空間、ここでは QEMU)がやること」
+     - (a) の準備の4行: VM を作る / vCPU を作る / メモリを登録する。それぞれ、誰が決めて、誰が実行しているか
+     - KVM_SET_USER_MEMORY_REGION の userspace_addr は、QEMU の中の何か。mymem の言葉で言うと
+     - KVM_RUN が 59,074 回: 項目 3 の vCPU ループ
+     - KVM_IRQ_LINE_STATUS: 「割り込み」= デバイスが CPU に「用事ができた」と知らせる仕組み。
+       UART は QEMU の中にいるのに、ゲストの CPU に割り込みを届けるのはなぜ QEMU ではなく KVM なのか
+     - (b) の 15,000 回: 項目 3 の注釈にある CPUID / EPT_VIOLATION / HLT。なぜこれらは KVM だけで片付くのか -->
+
+| KVM(カーネル)がやること                                                                             | VMM(ユーザー空間)がやること                                                                             |
+| --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| VMMからの依頼でVMを作ったりする                                                                     | ioctl で、VMを作る、vCPUを作る、メモリを登録することを KVM に依頼する                                   |
+| ゲストの物理メモリは、ゲストが初めて触った時に、EPT_VIOLATION をKVMが処理して割り当てる             | ゲストの仮想メモリは mmap して登録する                                                                  |
+| VM exit は KVM が制御し、自分で処理できるものはするが、VMMに任せるものはVMMに委譲する（IO処理とか） | ioctl で処理していたところに KVM から処理が帰ってきたら、デバイスをエミュレートするような処理を実施する |
+
+> ✅ 3行とも分担の向きは正しい(09-26)。特に3行目「自分で片付くものは KVM、デバイスが絡むものは VMM に戻す」が責務分担の核心。
+> ⚠️ 2行目の VMM 側: mmap して登録するのは「ゲストの**仮想**メモリ」ではなく「ゲストの**物理**メモリになる領域」。
+> ゲストの仮想メモリは、ゲストのカーネルが**自分のページテーブル**で作るもので、VMM も KVM も関与しない(項目 4 の 2段変換の1段目)。
+> 残りの2行は別の場所で書けている: 「割り込み」は下の箇条書き(決めるのは QEMU、届けるのは KVM)、「vCPU を走らせる」は項目 7 で書く
+
+- KVM_SET_USER_MEMORY_REGION の userspace_addr は、QEMU の中のなんだろう。QEMUの仮想アドレス範囲の中で、ゲストのために確保した領域の先頭アドレスとか？
+    > ✅ 正解。確かめた(2026-09-26、ゲスト起動中の QEMU の `/proc/<pid>/smaps` で 500 MiB 以上の領域):
+    >
+    > ```
+    > 785223e00000-785243e00000 rw-p  (パスなし = 匿名)  Size=524288 kB  Rss=149504 kB
+    > ```
+    >
+    > `-m 512` の 512 MiB が、QEMU の**匿名 mmap 1個**。mymem Step 2 の 1 GiB と同じもの。
+    > しかも 512 MiB 予約して Rss は 146 MiB = **ゲストのメモリも遅延割り当て**(ゲストが触ったページだけ物理メモリが付く)。
+    > 「ゲスト物理メモリはホストから見れば mmap しただけの領域」(Phase -1 の最後に書いた一文)の実物
+- UART は QEMU の中にいるのに、ゲストの CPU に割り込みを届けるのはなぜ QEMU ではなく KVM なのか。CPUと直接やりとりできるのがKVMだからでは？それに、KVM_IRW_LINE_STATUS で、QEMU がKVM に割り込みを入れてと ioctl で依頼をしている。
+    > ✅ 方向は正しい。もう一段具体的に: 割り込みは「ゲストの CPU の状態」に差し込むもので、それができるのは
+    > **VM entry の瞬間**(vCPU の箱にある状態を CPU に載せるとき)。entry を実行するのは KVM だけなので、KVM に頼むしかない。
+    > 分担は「**割り込みを出すと決める**のは UART の真似をしている QEMU、**ゲストの CPU に届ける**のは KVM」。
+    > (割り込みの受付係 = 割り込みコントローラの真似も、速さのために KVM の中にある。strace の `KVM_SET_IRQCHIP` がそれ)
+
+---
+
 ## 分かったこと
 
 ## 次にやること
 
 - [x] 2. CPU のモード(09-25)
 - [x] 3. VM entry と VM exit、trap-and-emulate(09-26)
-- [ ] 6. KVM と VMM の責務分担
+- [x] 6. KVM と VMM の責務分担(09-26)
 - [ ] 7. vCPU とスレッド
 - [ ] 4. EPT(Phase -1 の「ページテーブルと EPT」を元に)
 - [ ] 5. 完全仮想化 と 準仮想化
