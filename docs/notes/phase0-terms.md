@@ -18,7 +18,7 @@ Phase -1 の用語は全部自分で書いたので、ここも項目ごとに�
 | --- | ------------------------------------------------------------------------------------- | ------------- |
 | 1   | ハードウェア仮想化 / OS-level 仮想化(コンテナ) / 言語レベルサンドボックス の3層の違い | -             |
 | 2   | CPU のモード: 特権モード / 非特権モード / ゲストモード(VT-x, AMD-V)                   | ✅ 09-25      |
-| 3   | VM entry と VM exit、trap-and-emulate                                                 | -             |
+| 3   | VM entry と VM exit、trap-and-emulate                                                 | ✅ 09-26      |
 | 4   | EPT(2段階アドレス変換)、guest physical / host virtual の対応関係                      | -             |
 | 5   | 完全仮想化 と 準仮想化(virtio)                                                        | -             |
 | 6   | KVM(カーネル側: CPU とメモリ)と VMM(ユーザー空間: デバイス)の責務分担 ★               | -             |
@@ -76,12 +76,80 @@ crw-rw---- 10,232 root 25 Sep 18:39 /dev/kvm
 
 ---
 
+## 3. VM entry と VM exit、trap-and-emulate
+
+### 観察 (2026-09-26、vmm-dev 上)
+
+ホストのカーネル(`/boot/vmlinuz`)を QEMU + KVM でゲストとして 8 秒だけ起動し(rootfs が無いので panic で止まる。Phase 0 の環境確認と同じ)、
+その間の VM exit を `perf kvm stat` で数えた:
+
+```sh
+sudo perf kvm stat record -o /tmp/kvm.data -a -- timeout 8 qemu-system-x86_64 -enable-kvm -m 512 \
+    -kernel /boot/vmlinuz -append "console=ttyS0 panic=-1" -nographic -no-reboot > /tmp/qemu.out 2>&1
+sudo perf kvm -i /tmp/kvm.data stat report --stdio                 # exit の理由別
+sudo perf kvm -i /tmp/kvm.data stat report --stdio --event=ioport  # I/O ポート別
+```
+
+exit の理由(上位):
+
+| VM-EXIT            | 回数       | 割合  | 平均時間  |
+| ------------------ | ---------- | ----- | --------- |
+| IO_INSTRUCTION     | 72,168     | 79.6% | 11.74 µs  |
+| CPUID              | 8,682      | 9.6%  | 2.99 µs   |
+| EPT_MISCONFIG      | 4,529      | 5.0%  | 19.83 µs  |
+| EXTERNAL_INTERRUPT | 1,453      | 1.6%  | 10.50 µs  |
+| EPT_VIOLATION      | 959        | 1.1%  | 47.33 µs  |
+| ...                |            |       |           |
+| CR_ACCESS          | 332        | 0.4%  | 3.24 µs   |
+| HLT                | 7          | 0.0%  | 755.84 µs |
+| **合計**           | **90,671** |       |           |
+
+I/O ポート別(上位):
+
+| ポート     | 回数   | 平均時間 |
+| ---------- | ------ | -------- |
+| 0x3f8:POUT | 30,442 | 13.53 µs |
+| 0x3fd:PIN  | 28,754 | 3.50 µs  |
+| 0x402:POUT | 3,223  | 6.83 µs  |
+
+- ゲストが画面(シリアルコンソール)に出したログは **30,409 バイト**(`wc -c /tmp/qemu.out`)。0x3f8 への書き込みは **30,442 回**。ほぼ一致
+- 0x3f8 は COM1(1番目のシリアルポート = UART)のデータ用ポート。0x3fd は同じ UART の「送信できる状態か」を読む状態用ポート
+
+### 自分の言葉で
+
+<!-- 手がかり:
+     - VM entry / VM exit: 項目 2 の表でいうと、どこからどこへの移動か。KVM_RUN(ioctl)とどう関係するか
+     - 0x3f8 が約 30,000 回: ゲストが1文字出すたびに何が起きているか。誰が「UART のフリ」をしているか
+     - trap-and-emulate: この 0x3f8 の例を、trap と emulate に分けて言うと
+     - 1回 13.5 µs × 3万回: Phase -1 の「1バイトずつ read」と何が似ているか
+     - 余力があれば: CPUID / EPT_VIOLATION / HLT は、それぞれゲストが何をしたときの exit か(推測でよい) -->
+
+- VM entry は、root -> non-root の移動かな。特権・非特権はここでは関係ない？
+    > ✅ 正しい。VM entry / exit が動かすのは root / non-root の軸だけで、2つの軸は独立している。
+    > exit はゲストのカーネル(ring 0)からもゲストのアプリ(ring 3)からも起きうるし、entry ではゲストが元いた ring に戻る。
+    > ただし UART の往復全体では**両方の軸**を通る: non-root → root ring 0(KVM)→ root ring 3(QEMU)→ システムコールで ring 0 → non-root
+- VM exit は逆に、non-root -> root の移動かな。non-root では実行できない処理をCPUが例外を出して KVM に処理を委譲する流れ。
+    > ⚠️ 1点: 「実行できない」というより、**KVM が「これは見張る」と CPU に設定した操作**(I/O など。CPUID は常に)をすると exit する。
+    > 設定は KVM が VM entry の前に CPU に登録しておく(exit したときの戻り先も一緒に)。項目 2 の「ホストが見張りたいと決めた操作」
+- ゲストが１文字出すたびに、VM exit が起きてKVMに制御が戻り、KVMが QEMU に対して「書き込みがあったよ」と処理を委譲する。QEMUはデバイスのフリをしてIO処理を担当する。今回は標準出力に出しており、ファイルにリダイレクトするコマンドで起動していたので、ファイルに記録されている。
+- 0x3f8 への書き込みでは、CPU が VM exit を出して KVM に処理を委譲する流れがまさに trap。そして QEMU が標準出力に書き込んで UART のフリをしているのがまさに emulate。
+- 1回 13.5 µs × 3万回 の書き込み処理は、Phase -1 で、1バイトずつ read した時と似ている。
+    - カーネルとユーザー空間の切り替えのコストのように、non-root, root の切り替えにコストがかかっている。
+    - しかも１文字ずつでそれが起きている。
+    > ✅ ぴったり。そしてこの解決策も Phase -1 と同じ形: まとめて渡して往復を減らす(`BufReader`)= **virtio**(項目 5)。
+    > 1文字ずつポートに書く代わりに、共有メモリに溜めて「溜まったよ」の通知だけ exit する
+    > 余力の問いの答え(参考): CPUID = ゲストが「自分はどんな CPU か」を尋ねた(答えは KVM が決める)/
+    > EPT_VIOLATION = ゲストが初めて触ったゲスト物理ページ(mymem Step 2 のページフォルトと同じ、遅延割り当て)/
+    > HLT = ゲストが「やることがないので止まる」と言った(アイドル。KVM はそのスレッドを眠らせる)。3つとも QEMU まで戻らず KVM だけで片付く
+
+---
+
 ## 分かったこと
 
 ## 次にやること
 
 - [x] 2. CPU のモード(09-25)
-- [ ] 3. VM entry と VM exit、trap-and-emulate
+- [x] 3. VM entry と VM exit、trap-and-emulate(09-26)
 - [ ] 6. KVM と VMM の責務分担
 - [ ] 7. vCPU とスレッド
 - [ ] 4. EPT(Phase -1 の「ページテーブルと EPT」を元に)
