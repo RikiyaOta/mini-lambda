@@ -162,15 +162,15 @@ KVMを触る前に、ユーザー空間とカーネルの境界を体で理解�
 
 ### 用語の地図
 
-`docs/glossary.md` に育てていく。
+`docs/glossary.md` に育てていく。 → 7項目とも自分の言葉で書いた(2026-09-25〜10-09、`docs/notes/phase0-terms.md`)。残りは glossary「## 仮想化の基礎」の書き直し
 
-- [ ] ハードウェア仮想化 / OS-level仮想化(コンテナ) / 言語レベルサンドボックス の3層の違い
-- [ ] CPUのモード: 特権モード / 非特権モード / **ゲストモード**(VT-x, AMD-V)
-- [ ] VM entry と VM exit、trap-and-emulate
-- [ ] EPT(2段階アドレス変換)、guest physical / host virtual の対応関係
-- [ ] 完全仮想化 と 準仮想化(virtio)
-- [ ] **KVM(カーネル側:CPUとメモリ)と VMM(ユーザ空間:デバイス)の責務分担** — ここが曖昧だとPhase 3で必ず詰まる
-- [ ] vCPU が「ゲストのCPU役を務めている時間帯のホストのスレッド」であること
+- [x] ハードウェア仮想化 / OS-level仮想化(コンテナ) / 言語レベルサンドボックス の3層の違い
+- [x] CPUのモード: 特権モード / 非特権モード / **ゲストモード**(VT-x, AMD-V)
+- [x] VM entry と VM exit、trap-and-emulate
+- [x] EPT(2段階アドレス変換)、guest physical / host virtual の対応関係
+- [x] 完全仮想化 と 準仮想化(virtio)
+- [x] **KVM(カーネル側:CPUとメモリ)と VMM(ユーザ空間:デバイス)の責務分担** — ここが曖昧だとPhase 3で必ず詰まる
+- [x] vCPU が「ゲストのCPU役を務めている時間帯のホストのスレッド」であること
 
 ### 関数フォーマットの設計
 
