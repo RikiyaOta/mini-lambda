@@ -1,0 +1,10 @@
+[package]
+name = "sandbox-process"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# Phase 1 のバックエンド: 関数を素のサブプロセスとして実行する。作者が書く。
+[dependencies]
+faas-core.workspace = true
+tokio.workspace = true

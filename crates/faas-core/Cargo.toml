@@ -1,0 +1,13 @@
+[package]
+name = "faas-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# trait Sandbox / Instance、Function、manifest の読み込み。作者が書く。
+# 必要な依存(serde, toml, async-trait など)は書きながら足す
+[dependencies]
+anyhow.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }
+tempfile = "3.27.0"
+toml = "1.1.8"

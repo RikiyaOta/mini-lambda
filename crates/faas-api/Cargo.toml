@@ -1,0 +1,11 @@
+[package]
+name = "faas-api"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# HTTP 層(axum)。エージェントが書く(CLAUDE.md の「書いてよいもの」)
+[dependencies]
+faas-core.workspace = true
+sandbox-process.workspace = true
+tokio.workspace = true

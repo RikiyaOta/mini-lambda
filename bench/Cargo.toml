@@ -1,0 +1,9 @@
+[package]
+name = "bench"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# ベンチハーネス。エージェントが書く。全 Phase で同じものを流し、results/ に CSV を残す
+[dependencies]
+tokio.workspace = true
