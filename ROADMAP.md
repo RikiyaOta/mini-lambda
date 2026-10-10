@@ -162,7 +162,7 @@ KVMを触る前に、ユーザー空間とカーネルの境界を体で理解�
 
 ### 用語の地図
 
-`docs/glossary.md` に育てていく。 → 7項目とも自分の言葉で書いた(2026-09-25〜10-09、`docs/notes/phase0-terms.md`)。残りは glossary「## 仮想化の基礎」の書き直し
+`docs/glossary.md` に育てていく。 → 7項目とも自分の言葉で書いた(2026-09-25〜10-09、`docs/notes/phase0-terms.md`)。glossary「## 仮想化の基礎」も書き直した(10-10。PIO / MMIO と UART は Phase 3 で)
 
 - [x] ハードウェア仮想化 / OS-level仮想化(コンテナ) / 言語レベルサンドボックス の3層の違い
 - [x] CPUのモード: 特権モード / 非特権モード / **ゲストモード**(VT-x, AMD-V)
