@@ -2,7 +2,7 @@
 
 mod function;
 use anyhow::Result;
-pub use function::{Function, FunctionManifest, Runtime, read_function_def};
+pub use function::{Function, FunctionManifest, Runtime};
 use std::future::Future;
 
 /// 実行環境の起動内訳. RSS など.

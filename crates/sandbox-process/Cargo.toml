@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 faas-core.workspace = true
 tokio.workspace = true
+anyhow.workspace = true

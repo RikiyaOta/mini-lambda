@@ -7,7 +7,7 @@ use anyhow::Result;
 use serde::Deserialize;
 
 /// `functions/{name}/manifest.toml` に対応する構造体.
-#[derive(Deserialize, Debug, PartialEq)]
+#[derive(Deserialize, Debug, PartialEq, Clone)]
 pub struct FunctionManifest {
     /// 実行するファイル.
     pub handler: String,
@@ -26,7 +26,7 @@ pub struct FunctionManifest {
 }
 
 /// 関数定義.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Function {
     /// 関数名
     pub name: String,
@@ -39,7 +39,7 @@ pub struct Function {
 }
 
 /// 今回のプロジェクトで定義するランタイム.
-#[derive(Deserialize, Debug, PartialEq)]
+#[derive(Deserialize, Debug, PartialEq, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum Runtime {
     Script,
@@ -47,16 +47,18 @@ pub enum Runtime {
     Python3,
 }
 
-pub fn read_function_def(name: &str, base: &Path) -> Result<Function> {
-    let path = base.join(format!("functions/{name}/manifest.toml"));
-    let file = std::fs::read_to_string(path)?;
-    let manifest: FunctionManifest = toml::from_str(&file)?;
+impl Function {
+    pub fn build(name: &str, base: &Path) -> Result<Function> {
+        let path = base.join(format!("functions/{name}/manifest.toml"));
+        let file = std::fs::read_to_string(path)?;
+        let manifest: FunctionManifest = toml::from_str(&file)?;
 
-    Ok(Function {
-        name: name.to_string(),
-        base_dir: base.join(format!("functions/{name}/")),
-        manifest,
-    })
+        Ok(Function {
+            name: name.to_string(),
+            base_dir: base.join(format!("functions/{name}/")),
+            manifest,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -80,7 +82,7 @@ env = { ENV1 = "hoge", ENV2 = "fuga"}
         std::fs::create_dir_all(path.parent().unwrap())?;
         std::fs::write(path, content)?;
 
-        let f = read_function_def(name, dir.path())?;
+        let f = Function::build(name, dir.path())?;
 
         assert_eq!(
             f,

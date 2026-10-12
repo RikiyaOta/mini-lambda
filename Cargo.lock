@@ -218,6 +218,7 @@ dependencies = [
 name = "sandbox-process"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "faas-core",
  "tokio",
 ]
