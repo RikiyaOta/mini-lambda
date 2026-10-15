@@ -19,3 +19,5 @@ faas-core = { path = "crates/faas-core" }
 sandbox-process = { path = "crates/sandbox-process" }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
+tempfile = "3.27.0"
+toml = "1.1.8"

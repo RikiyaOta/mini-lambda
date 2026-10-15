@@ -4,10 +4,10 @@ use std::{
 };
 
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// `functions/{name}/manifest.toml` に対応する構造体.
-#[derive(Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct FunctionManifest {
     /// 実行するファイル.
     pub handler: String,
@@ -39,7 +39,7 @@ pub struct Function {
 }
 
 /// 今回のプロジェクトで定義するランタイム.
-#[derive(Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum Runtime {
     Script,
