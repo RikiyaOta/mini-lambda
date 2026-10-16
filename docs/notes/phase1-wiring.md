@@ -39,4 +39,27 @@
   - `child.stdin.unwrap()` は中身を持ち去る(部分 move)→ `wait_with_output(self)` が呼べない。`take()` で取り出して `None` を残す
   - 次: payload 1 MiB で止まるか(パイプ 64 KiB の罠)、タイムアウトの値をどこから取るか
 
+### ステップ 2 の残り(2026-10-16 時点。ここから再開する)
+
+いま通っているテスト: `can_pass_stdin_to_stdout_by_cat`(小さい payload を `cat` で往復)。
+テストの作り方: `tempdir()` に manifest と handler を書く → `set_mode(0o755)` → `Function::build` → `spawn` → `invoke`。`#[tokio::test]` を使う。
+
+予告済みの罠(答えはまだ言っていない):
+
+- [ ] **罠 2: payload 1 MiB**(`vec![b'a'; 1 << 20]` を `cat` に通す)。今は「`write_all` で全部書き終える → `wait_with_output` で読み始める」の順。
+      パイプは 64 KiB。止まるかを**予想してから**動かす。止まったら、なぜ止まるか・どうすれば避けられるかを考える
+- [ ] **タイムアウトの値をどこから取るか**: 今は `myrun` と同じ環境変数 `MINI_LAMBDA_TIMEOUT`(秒)。manifest には `timeout_ms` がある
+- [ ] **罠 3: タイムアウトした後、子プロセスはどうなっているか**。`tokio::time::timeout` は Future を捨てるだけ。
+      捨てられた `Child` は止まるのか(`Command` のメソッド一覧を見る)。孫プロセスは(`myrun` のプロセスグループ)
+- [ ] テストを足す: `sleep 10` + `timeout_ms = 200` → 約 0.2 秒でエラー / `sleep 100 & sleep 10` → タイムアウト後に `pgrep sleep` で残っていない
+
+細かいところ(後回しでよい):
+
+- [ ] `spawn().unwrap()` → `?` に(handler が無いときに panic せずエラーで返す)
+- [ ] stderr を捨てている(コード中の自問)。どう扱うか決める
+- [ ] `runtime` を見ていない(今は handler を直接実行するだけ)。Phase 1 は `script` だけ対応、と決めるならそれで良い
+- [ ] `spawn` で読んでいる `handler_content` は `invoke` で使っていない。要るか決める
+
+全部済んだらステップ 2 ✅ → ステップ 3(`faas-api`、エージェントが書く)へ
+
 ## 分かったこと
