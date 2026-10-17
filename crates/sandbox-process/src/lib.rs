@@ -2,9 +2,9 @@ use std::env::VarError;
 use std::process::Stdio;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Error, Result};
 use faas_core::{Function, Instance, InstanceMetrics, Sandbox};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::{fs, process::Command, time::timeout};
 
 /// 関数を素のサブプロセスとして起動する（隔離なし。比較の基準）
@@ -54,15 +54,23 @@ impl Instance for InstanceProcess {
                 .spawn()
                 .unwrap();
             let mut child_stdin = child.stdin.take().unwrap();
+            let mut child_stdout = child.stdout.take().unwrap();
 
-            child_stdin.write_all(payload).await?;
+            let mut result: Vec<u8> = vec![];
+            let write_future = async {
+                child_stdin.write_all(payload).await?;
+                // 書き込み側の fd が残っていると、子プロセスが終了してくれない。
+                // なので明示的に閉じておく。
+                drop(child_stdin);
+                Ok::<(), Error>(())
+            };
+            let read_future = child_stdout.read_to_end(&mut result);
 
-            // 子の stdin を閉じなければ、書き込み側の fd が残っているとみなされて、
-            // 子プロセスが終了してくれない。なので明示的に閉じておく。
-            drop(child_stdin);
+            let _ = tokio::join!(write_future, read_future);
 
-            let output = child.wait_with_output().await?;
-            Ok(output.stdout)
+            // 子プロセスが終了するのを待つ。
+            let _ = child.wait_with_output().await?;
+            Ok(result)
         };
 
         async {
@@ -99,66 +107,100 @@ fn get_timeout() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
+    use std::{os::unix::fs::PermissionsExt, path::PathBuf};
 
     use super::*;
     use anyhow::Result;
-    use faas_core::{Function, FunctionManifest, Runtime};
-    use tempfile::tempdir;
+    use faas_core::Function;
+    use tempfile::{TempDir, tempdir};
 
-    fn prepare_function_toml(f: &Function) -> Result<()> {
-        let path = f.base_dir.join("manifest.toml");
-        let content = toml::to_string(&f.manifest)?;
-
+    /// テスト用にファイルを用意するヘルパー。
+    /// ファイルの内容を直接文字列でかけるように簡潔なシグネチャにしておく。
+    fn write_file(path: PathBuf, contents: String, is_executable: bool) -> Result<()> {
         std::fs::create_dir_all(path.parent().unwrap())?;
-        std::fs::write(path, content)?;
+        std::fs::write(&path, contents)?;
+
+        if is_executable {
+            let mut perm = std::fs::metadata(&path)?.permissions();
+            perm.set_mode(0o755);
+            std::fs::set_permissions(&path, perm)?;
+        }
 
         Ok(())
     }
 
-    fn prepare_function_handler(f: &Function, handler: String) -> Result<()> {
-        let path = f.base_dir.join(&f.manifest.handler);
+    fn manifest_path(base: &TempDir, name: &str) -> PathBuf {
+        base.path().join(format!("functions/{name}/manifest.toml"))
+    }
 
-        std::fs::create_dir_all(path.parent().unwrap())?;
-
-        std::fs::write(&path, handler)?;
-
-        // スクリプトに実行権限を付与しておく.
-        let mut perm = std::fs::metadata(&path)?.permissions();
-        perm.set_mode(0o755);
-        std::fs::set_permissions(&path, perm)?;
-
-        Ok(())
+    fn script_path(base: &TempDir, name: &str) -> PathBuf {
+        base.path().join(format!("functions/{name}/index"))
     }
 
     #[tokio::test]
     async fn can_pass_stdin_to_stdout_by_cat() -> Result<()> {
-        // 関数定義とスクリプトの準備
-        let name = "test_cat_001".to_string();
         let base_dir = tempdir()?;
-        // 素直にファイル直書きでいいか？ごちゃついている。
-        let f = Function {
-            base_dir: base_dir.path().join(format!("functions/{}/", &name)),
-            name: name.clone(),
-            manifest: FunctionManifest {
-                handler: "index".to_string(),
-                runtime: Runtime::Script,
-                timeout_ms: 12345,
-                memory_mib: 67890,
-                env: vec![(String::from("ENV1"), String::from("hoge"))]
-                    .into_iter()
-                    .collect(),
-            },
-        };
-        let handler = "#!/bin/bash\ncat".to_string(); // cat をそのまま実行するだけのスクリプト.
-        prepare_function_toml(&f)?;
-        prepare_function_handler(&f, handler)?;
+
+        // 関数定義とスクリプトの準備
+        let name = "test_cat_001";
+        let raw_manifest = r#"
+handler = "index"
+runtime = "script"
+timeout_ms = 12345
+memory_mib = 67890
+env = { ENV1 = "hoge" }
+"#
+        .to_string();
+        write_file(manifest_path(&base_dir, name), raw_manifest, false)?;
+
+        let script_content = r#"#!/bin/bash
+
+cat
+"#
+        .to_string();
+        write_file(script_path(&base_dir, name), script_content, true)?;
 
         // スクリプト実行
         let f = Function::build(&name, base_dir.path())?;
         let sandbox = SandboxProcess {};
         let mut instance = sandbox.spawn(&f).await?;
-        let payload = "hoge fuga".as_bytes();
+        let payload = b"hoge fuga";
+        let result = instance.invoke(payload).await?;
+
+        // 検証
+        assert_eq!(result, payload);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn can_pass_large_payload() -> Result<()> {
+        let base_dir = tempdir()?;
+
+        // 関数定義とスクリプトの準備
+        let name = "test_cat_002";
+        let raw_manifest = r#"
+handler = "index"
+runtime = "script"
+timeout_ms = 12345
+memory_mib = 67890
+env = { ENV1 = "hoge" }
+"#
+        .to_string();
+        write_file(manifest_path(&base_dir, name), raw_manifest, false)?;
+
+        let script_content = r#"#!/bin/bash
+
+cat
+"#
+        .to_string();
+        write_file(script_path(&base_dir, name), script_content, true)?;
+
+        // スクリプト実行
+        let f = Function::build(&name, base_dir.path())?;
+        let sandbox = SandboxProcess {};
+        let mut instance = sandbox.spawn(&f).await?;
+        let payload = &[b'a'; 1 << 20]; // 1MB のデータを流す
         let result = instance.invoke(payload).await?;
 
         // 検証
