@@ -1,4 +1,3 @@
-use std::env::VarError;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -74,9 +73,14 @@ impl Instance for InstanceProcess {
         };
 
         async {
-            match get_timeout() {
-                Some(secs) => timeout(Duration::from_secs(secs), future).await?,
-                None => future.await,
+            match timeout(
+                Duration::from_millis(self.function.manifest.timeout_ms as u64),
+                future,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(e) => Err(e)?,
             }
         }
     }
@@ -89,19 +93,6 @@ impl Instance for InstanceProcess {
 
     fn metrics(&self) -> InstanceMetrics {
         InstanceMetrics {}
-    }
-}
-
-fn get_timeout() -> Option<u64> {
-    match std::env::var("MINI_LAMBDA_TIMEOUT") {
-        Ok(v) => Some(
-            v.parse()
-                .expect("[Error] MINI_LAMBDA_TIMEOUT には秒数を指定してください。"),
-        ),
-        Err(VarError::NotPresent) => None,
-        Err(VarError::NotUnicode(_)) => {
-            panic!("[Error] ここは到達しないはず。MYRUN_TIMEOUT は Unicode なので。")
-        }
     }
 }
 
@@ -161,7 +152,7 @@ cat
         write_file(script_path(&base_dir, name), script_content, true)?;
 
         // スクリプト実行
-        let f = Function::build(&name, base_dir.path())?;
+        let f = Function::build(name, base_dir.path())?;
         let sandbox = SandboxProcess {};
         let mut instance = sandbox.spawn(&f).await?;
         let payload = b"hoge fuga";
@@ -197,7 +188,7 @@ cat
         write_file(script_path(&base_dir, name), script_content, true)?;
 
         // スクリプト実行
-        let f = Function::build(&name, base_dir.path())?;
+        let f = Function::build(name, base_dir.path())?;
         let sandbox = SandboxProcess {};
         let mut instance = sandbox.spawn(&f).await?;
         let payload = &[b'a'; 1 << 20]; // 1MB のデータを流す
@@ -205,6 +196,42 @@ cat
 
         // 検証
         assert_eq!(result, payload);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancel_child_by_timeout() -> Result<()> {
+        let base_dir = tempdir()?;
+
+        // 関数定義とスクリプトの準備
+        let name = "test_cat_002";
+        let raw_manifest = r#"
+handler = "index"
+runtime = "script"
+timeout_ms = 200
+memory_mib = 67890
+env = { ENV1 = "hoge" }
+"#
+        .to_string();
+        write_file(manifest_path(&base_dir, name), raw_manifest, false)?;
+
+        let script_content = r#"#!/bin/bash
+
+sleep 12345
+"#
+        .to_string();
+        write_file(script_path(&base_dir, name), script_content, true)?;
+
+        // スクリプト実行
+        let f = Function::build(name, base_dir.path())?;
+        let sandbox = SandboxProcess {};
+        let mut instance = sandbox.spawn(&f).await?;
+        let payload = b"hoge";
+        let result = instance.invoke(payload).await;
+
+        // 検証
+        assert!(result.is_err_and(|result| result.to_string() == "deadline has elapsed"));
 
         Ok(())
     }
