@@ -1,0 +1,3 @@
+#!/bin/bash
+# リクエストボディを stdin で受け取り、そのまま stdout に返す
+cat

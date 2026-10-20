@@ -9,3 +9,10 @@ license.workspace = true
 faas-core.workspace = true
 sandbox-process.workspace = true
 tokio.workspace = true
+anyhow.workspace = true
+axum = "0.8.9"
+
+[dev-dependencies]
+tempfile.workspace = true
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

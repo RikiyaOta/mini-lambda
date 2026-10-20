@@ -1,0 +1,5 @@
+handler = "index"
+runtime = "script"
+timeout_ms = 3000
+memory_mib = 128
+env = {}
