@@ -1,0 +1,8 @@
+backend,metric,n,p50_us,p99_us,machine
+process,http.total,10,3544,3761,"11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz / Linux 6.12.111+deb13-amd64"
+process,http.ttfb,10,3542,3759,"11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz / Linux 6.12.111+deb13-amd64"
+process,stages.build,1,131,131,"11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz / Linux 6.12.111+deb13-amd64"
+process,stages.destroy,1,0,0,"11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz / Linux 6.12.111+deb13-amd64"
+process,stages.invoke,1,7629,7629,"11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz / Linux 6.12.111+deb13-amd64"
+process,stages.spawn,1,194,194,"11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz / Linux 6.12.111+deb13-amd64"
+process,stages.total,1,7957,7957,"11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz / Linux 6.12.111+deb13-amd64"

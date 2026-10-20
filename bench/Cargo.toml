@@ -6,4 +6,7 @@ license.workspace = true
 
 # ベンチハーネス。エージェントが書く。全 Phase で同じものを流し、results/ に CSV を残す
 [dependencies]
+faas-core.workspace = true
+sandbox-process.workspace = true
 tokio.workspace = true
+anyhow.workspace = true
