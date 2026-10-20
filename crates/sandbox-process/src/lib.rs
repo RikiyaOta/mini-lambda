@@ -3,6 +3,9 @@ use std::time::Duration;
 
 use anyhow::{Error, Result};
 use faas_core::{Function, Instance, InstanceMetrics, Sandbox};
+use nix::errno::Errno;
+use nix::sys::signal::{Signal, killpg};
+use nix::unistd::Pid;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::{fs, process::Command, time::timeout};
 
@@ -42,7 +45,7 @@ pub struct InstanceProcess {
 
 impl Instance for InstanceProcess {
     fn invoke(&mut self, payload: &[u8]) -> impl Future<Output = Result<Vec<u8>>> + Send {
-        let future = async {
+        async {
             let script = self.function.base_dir.join(&self.function.manifest.handler);
             // 子プロセスでスクリプトを実行する.
             // 子は親から渡されるデータを標準入力で受け取って、その標準出力を親に渡すようにしたいので、
@@ -50,29 +53,42 @@ impl Instance for InstanceProcess {
             let mut child = Command::new(script.into_os_string())
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
+                .process_group(0) // 子プロセス自身のPIDを PGID にする.
                 .spawn()
                 .unwrap();
-            let mut child_stdin = child.stdin.take().unwrap();
-            let mut child_stdout = child.stdout.take().unwrap();
+            let child_pid = Pid::from_raw(child.id().unwrap() as i32);
 
-            let mut result: Vec<u8> = vec![];
-            let write_future = async {
-                child_stdin.write_all(payload).await?;
-                // 書き込み側の fd が残っていると、子プロセスが終了してくれない。
-                // なので明示的に閉じておく。
-                drop(child_stdin);
-                Ok::<(), Error>(())
+            let future = async {
+                let mut child_stdin = child.stdin.take().unwrap();
+                let mut child_stdout = child.stdout.take().unwrap();
+
+                let mut result: Vec<u8> = vec![];
+                let write_future = async {
+                    child_stdin.write_all(payload).await?;
+                    // 書き込み側の fd が残っていると、子プロセスが終了してくれない。
+                    // なので明示的に閉じておく (async move にしてもいいはず)
+                    drop(child_stdin);
+                    Ok::<(), Error>(())
+                };
+                let read_future = child_stdout.read_to_end(&mut result);
+                // 子プロセス(bashなど)の終了を待ってから、残りの子孫を殺す
+                // 孫プロセスがバックグラウンドで動き続けるなどして、stdout
+                // を握ったまま関数全体が終了しないパターンを考慮する (read_future が終わらない)
+                let reap_future = async {
+                    let _ = child.wait().await?;
+                    match killpg(child_pid, Signal::SIGKILL) {
+                        // プロセスグループに誰もいないケース。
+                        // これは正常終了扱いにする。
+                        Err(Errno::ESRCH) => Ok::<(), Error>(()),
+                        other => other.map_err(anyhow::Error::new),
+                    }
+                };
+
+                let _ = tokio::join!(write_future, read_future, reap_future);
+
+                Ok(result)
             };
-            let read_future = child_stdout.read_to_end(&mut result);
 
-            let _ = tokio::join!(write_future, read_future);
-
-            // 子プロセスが終了するのを待つ。
-            let _ = child.wait_with_output().await?;
-            Ok(result)
-        };
-
-        async {
             match timeout(
                 Duration::from_millis(self.function.manifest.timeout_ms as u64),
                 future,
@@ -80,7 +96,13 @@ impl Instance for InstanceProcess {
             .await
             {
                 Ok(result) => result,
-                Err(e) => Err(e)?,
+                Err(e) => {
+                    // タイムアウトしたときにここに分岐する
+                    // 子プロセスをルートとするプロセスグループ全体に SIGKILL を送る。
+                    // (`myrun.rs` のときは最初にSIGTERMを送ったけど、今回は簡略化)
+                    killpg(child_pid, Signal::SIGKILL)?;
+                    Err(e)?
+                }
             }
         }
     }
@@ -232,6 +254,54 @@ sleep 12345
 
         // 検証
         assert!(result.is_err_and(|result| result.to_string() == "deadline has elapsed"));
+
+        // 子や孫プロセスが生きていないことを確認する
+        let status = std::process::Command::new("pgrep")
+            .args(["-f", "sleep 12345"])
+            .status()?;
+        assert!(!status.success()); // 一致するプロセスがないことが期待値.
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn kill_descendant_processes_in_happy_path() -> Result<()> {
+        let base_dir = tempdir()?;
+
+        // 関数定義とスクリプトの準備
+        let name = "test_cat_003";
+        let raw_manifest = r#"
+handler = "index"
+runtime = "script"
+timeout_ms = 5000
+memory_mib = 67890
+env = { ENV1 = "hoge" }
+"#
+        .to_string();
+        write_file(manifest_path(&base_dir, name), raw_manifest, false)?;
+
+        // スクリプト自体が即座に成功するが、バックグラウンドでプロセスが残るケース
+        let script_content = r#"#!/bin/bash
+
+sleep 99999 & echo done
+"#
+        .to_string();
+        write_file(script_path(&base_dir, name), script_content, true)?;
+
+        // スクリプト実行
+        let f = Function::build(name, base_dir.path())?;
+        let sandbox = SandboxProcess {};
+        let mut instance = sandbox.spawn(&f).await?;
+        let payload = b"hoge";
+        let result = instance.invoke(payload).await;
+
+        // 検証
+        // 関数自体は即座に成功しており、子孫プロセスがバックグラウンドにも残っていないことが期待値.
+        assert!(result.is_ok_and(|result| String::from_utf8_lossy(&result) == "done\n"));
+        let status = std::process::Command::new("pgrep")
+            .args(["-f", "sleep 99999"])
+            .status()?;
+        assert!(!status.success()); // 一致するプロセスがないことが期待値.
 
         Ok(())
     }

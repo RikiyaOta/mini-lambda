@@ -11,3 +11,4 @@ tokio.workspace = true
 anyhow.workspace = true
 tempfile.workspace = true
 toml.workspace = true
+nix.workspace = true
