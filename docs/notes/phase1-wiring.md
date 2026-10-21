@@ -22,7 +22,7 @@
 | 2   | `sandbox-process` で `Sandbox` を実装(起動、invoke、タイムアウト、destroy)        | 作者         | 🔶 10-20 主要項目は完了 |
 | 3   | `faas-api` で HTTP から `Sandbox` を呼ぶ                                          | エージェント | ✅ 10-20                |
 | 4   | `bench/` でコールドスタート等を測り、`results/phase1.csv` に残す                  | エージェント | ✅ 10-20                |
-| 5   | ADR `docs/decisions/0001-sandbox-trait.md`(なぜこの trait の形にしたか)           | 作者         | -                       |
+| 5   | ADR `docs/decisions/0001-sandbox-trait.md`(なぜこの trait の形にしたか)           | 作者         | ✅ 10-21                |
 
 ## メモ
 
