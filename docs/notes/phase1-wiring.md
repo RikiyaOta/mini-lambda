@@ -20,8 +20,8 @@
 | 0   | workspace の骨組み(ルートの `Cargo.toml`、空の crate 4つ)                         | エージェント | ✅ 10-10                |
 | 1   | `manifest.toml` の形を決め、`faas-core` に `Function` と読み込み、trait 2つを書く | 作者         | ✅ 10-10                |
 | 2   | `sandbox-process` で `Sandbox` を実装(起動、invoke、タイムアウト、destroy)        | 作者         | 🔶 10-20 主要項目は完了 |
-| 3   | `faas-api` で HTTP から `Sandbox` を呼ぶ                                          | エージェント | -                       |
-| 4   | `bench/` でコールドスタート等を測り、`results/phase1.csv` に残す                  | エージェント | -                       |
+| 3   | `faas-api` で HTTP から `Sandbox` を呼ぶ                                          | エージェント | ✅ 10-20                |
+| 4   | `bench/` でコールドスタート等を測り、`results/phase1.csv` に残す                  | エージェント | ✅ 10-20                |
 | 5   | ADR `docs/decisions/0001-sandbox-trait.md`(なぜこの trait の形にしたか)           | 作者         | -                       |
 
 ## メモ
@@ -100,3 +100,12 @@
 > 2つとも入って、「`killpg` で EOF が返る」まで一本の説明になった。補足: 引き継ぎの正体は、`fork` が fd テーブルを丸ごとコピーすること
 >
 > ✅ `spawn` を外に出した理由(`Err` の腕で PID が要る)と、中では `&mut Child` で足りたこと。最終形のコードと一致している
+
+- ベンチマークを取得して、その strace のログを読んでみた。
+  - fork が重いかと予想していた。
+  - 実際に重かったのは、bash 起動時のライブラリの読み込みや、PATHの探索だった。
+  - 単発の syscall で重いものはなく、複数の syscall が1つのコマンドの裏で動いていて、それが積み重なって全体として重い処理になっているとかは見えた。
+  - 数字は `results/phase1.csv` を参照。
+
+> ✅ 予想(`fork`)と実際(`bash` 起動時のライブラリ読み込み + `PATH` 探索)の対比、「単発で重い syscall は無く、積み重なって重い」という読み取り。
+> 一番の発見が押さえられている。補足: `fork`(`clone3` → `execve`)は約 0.15 ms で、`invoke` 全体のごく一部だった
