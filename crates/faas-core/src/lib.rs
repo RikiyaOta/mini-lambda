@@ -14,18 +14,15 @@ pub struct InstanceMetrics {}
 pub trait Sandbox: Send + Sync {
     type Instance: Instance;
 
-    // async fn spawn(&self, f: &Function) -> Result<Self::Instance>;
     fn spawn(&self, f: &Function) -> impl Future<Output = Result<Self::Instance>> + Send;
 }
 
 /// `Sandbox` によって実際に作られた実行環境.
 pub trait Instance: Send {
     /// 実行環境が作られた関数を呼び出す.
-    // async fn invoke(&mut self, payload: &[u8]) -> Result<Vec<u8>>;
     fn invoke(&mut self, payload: &[u8]) -> impl Future<Output = Result<Vec<u8>>> + Send;
 
     /// 実行環境を破棄する.
-    // async fn destroy(self) -> Result<()>;
     fn destroy(self) -> impl Future<Output = Result<()>> + Send;
 
     /// 実行環境の中身を観察する.
