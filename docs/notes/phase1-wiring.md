@@ -19,7 +19,7 @@
 | --- | --------------------------------------------------------------------------------- | ------------ | ----------------------- |
 | 0   | workspace の骨組み(ルートの `Cargo.toml`、空の crate 4つ)                         | エージェント | ✅ 10-10                |
 | 1   | `manifest.toml` の形を決め、`faas-core` に `Function` と読み込み、trait 2つを書く | 作者         | ✅ 10-10                |
-| 2   | `sandbox-process` で `Sandbox` を実装(起動、invoke、タイムアウト、destroy)        | 作者         | 🔶 10-20 主要項目は完了 |
+| 2   | `sandbox-process` で `Sandbox` を実装(起動、invoke、タイムアウト、destroy)        | 作者         | ✅ 10-22                |
 | 3   | `faas-api` で HTTP から `Sandbox` を呼ぶ                                          | エージェント | ✅ 10-20                |
 | 4   | `bench/` でコールドスタート等を測り、`results/phase1.csv` に残す                  | エージェント | ✅ 10-20                |
 | 5   | ADR `docs/decisions/0001-sandbox-trait.md`(なぜこの trait の形にしたか)           | 作者         | ✅ 10-21                |
@@ -55,15 +55,14 @@
 - [x] **罠 4: 正常終了後に孫が残る**(`sleep 99999 & echo done`)。孫が stdout を握ると `read_to_end` が EOF を受け取れず詰まる。
       方針: bash が終わったら関数は終了、残った子孫は殺す(10-20 決定) → `reap_future`(`child.wait()` → `killpg`)を `join!` に追加して解決
 
-細かいところ(後回しでよい):
+既知の制限(10-22 決定: Phase 1 では対応しない。どれも致命的でなく、Phase 2 の `sandbox-ns` は別実装になるため):
 
-- [ ] `join!` の3つの結果を `let _` で捨てている(`killpg` の ESRCH 以外のエラーや読み取り失敗が呼び出し側に見えない)
-- [ ] `spawn().unwrap()` → `?` に(handler が無いときに panic せずエラーで返す)
-- [ ] stderr を捨てている(コード中の自問)。どう扱うか決める
-- [ ] `runtime` を見ていない(今は handler を直接実行するだけ)。Phase 1 は `script` だけ対応、と決めるならそれで良い
-- [ ] `spawn` で読んでいる `handler_content` は `invoke` で使っていない。要るか決める
-
-全部済んだらステップ 2 ✅ → ステップ 3(`faas-api`、エージェントが書く)へ
+- `join!` の3つの結果を `let _` で捨てている(`killpg` の ESRCH 以外のエラーや読み取り失敗が呼び出し側に見えない)
+- `spawn().unwrap()`(handler に実行権限が無いと、そのリクエストだけ panic する。サーバーは落ちない)
+- stderr は親から引き継いでいる(関数の stderr がサーバーのログにそのまま出る)
+- `runtime` を見ていない。Phase 1 は `script`(handler を直接実行)のみ対応
+- `spawn` で読んでいる `handler_content` は `invoke` で使っていない
+- 環境変数を親からそのまま引き継いでいる(manifest の `env` は未使用。`PATH` 探索の時間がベンチを実行した人の環境に左右される)。Phase 2 で扱う
 
 ## 分かったこと
 

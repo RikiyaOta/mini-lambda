@@ -6,8 +6,12 @@
 
 ## 現在地
 
+- **Phase 1(縦の配線 + 計測基盤)完了(2026-10-22)** — `POST /invoke/{name}` → `sandbox-process` → stdout が返る。
+  タイムアウト(manifest の `timeout_ms`)、プロセスグループごとの kill、正常終了後の孫の掃除まで。
+  コールドスタート p50 3.7 ms(うち `invoke` 3.2 ms、`strace` で読むと `bash` 起動時の動的リンクと `PATH` 探索が大半)。
+  記録は `docs/notes/phase1-wiring.md`、ADR `docs/decisions/0001-sandbox-trait.md`、数字は `results/phase1.csv`。
+  **次は Phase 2(OS-level 隔離)**
 - **Phase -1(OSの基礎)完了(2026-09-24)** — 本を読みながら `experiments/oslearn/` で `nix` を使った演習を3本(`mycp` / `myrun` / `mymem`)やり切った。
-  次は Phase 0 の「用語の地図」
 - **Phase 0 の環境構築は完了** — GCPインスタンス作成、KVM動作確認済み
 - **ファイルコピー演習(`mycp`)は完了(2026-09-09)** — Step 1〜5 を通し、下記「到達点の確認」3項目を回収した。
   記録は `docs/notes/phase-minus1-syscall.md`、実測は `results/phase-minus1-bufsize.csv` と
@@ -99,8 +103,8 @@ Google AI Pro 特典の月$10 Cloudクレジットを利用(Google Developer Pro
 | Phase | 内容                                      | 目安        | 状態           |
 | ----- | ----------------------------------------- | ----------- | -------------- |
 | -1    | OSの基礎(前提知識)                        | 2〜3週      | 完了(09-24)    |
-| 0     | 準備と用語の地図                          | 2〜3日      | 環境構築は完了 |
-| 1     | 縦の配線 + 計測基盤                       | 3〜5日      |                |
+| 0     | 準備と用語の地図                          | 2〜3日      | 完了(CI 以外)  |
+| 1     | 縦の配線 + 計測基盤                       | 3〜5日      | 完了(10-22)    |
 | 2     | OS-level隔離(対照群)                      | 1週間(厳守) |                |
 | 3     | 自作VMM①: KVMで数命令動かす               | 2〜3週      |                |
 | 4     | 自作VMM②: Linuxをブートする               | 3〜4週      |                |
@@ -174,8 +178,8 @@ KVMを触る前に、ユーザー空間とカーネルの境界を体で理解�
 
 ### 関数フォーマットの設計
 
-- [ ] `manifest.toml`(handler, runtime, timeout_ms, memory_mib, env)+ コード本体
-- [ ] 最初は単一の実行ファイル/スクリプトのみ対応。パッケージング機構に凝らない
+- [x] `manifest.toml`(handler, runtime, timeout_ms, memory_mib, env)+ コード本体 — Phase 1 ステップ 1 で実装
+- [x] 最初は単一の実行ファイル/スクリプトのみ対応。パッケージング機構に凝らない
 
 **ゴール**: 環境が整い、上の用語を自分の言葉で説明できる
 
@@ -185,10 +189,10 @@ KVMを触る前に、ユーザー空間とカーネルの境界を体で理解�
 
 ここは**さっさと終わらせる**。凝るとPhase 3に到達する前に力尽きる。
 
-- [ ] axum で `POST /invoke/:function_name`
-- [ ] `std::process::Command` でサブプロセス実行、stdout をレスポンスに
-- [ ] タイムアウト処理
-- [ ] **隔離バックエンドのtraitを最初に切る**:
+- [x] axum で `POST /invoke/:function_name`(axum 0.8 なので実際は `/invoke/{function_name}`)
+- [x] `std::process::Command` でサブプロセス実行、stdout をレスポンスに(`tokio::process::Command`)
+- [x] タイムアウト処理
+- [x] **隔離バックエンドのtraitを最初に切る**(実際の形と理由は `docs/decisions/0001-sandbox-trait.md`):
 
 ```rust
 #[async_trait]
@@ -210,13 +214,13 @@ trait Instance: Send {
 
 `bench/` を作り、以降すべてのPhaseで同じものを流す。**これが学習のフィードバックループになる。**
 
-- [ ] コールドスタート(起動要求 → 最初のレスポンスバイト)p50 / p99
-- [ ] **コールドスタートの内訳**(段階ごとにタイムスタンプを打つ。Phase 6の最適化対象)
-- [ ] ウォーム呼び出しレイテンシ p50 / p99
-- [ ] インスタンスあたりのメモリフットプリント(ホストから見たRSS)
-- [ ] 単一ホストでの同時起動可能数
-- [ ] teardown時間
-- [ ] 結果を `results/phaseN.csv` に残し、READMEに表として追記していく
+- [x] コールドスタート(起動要求 → 最初のレスポンスバイト)p50 / p99
+- [x] **コールドスタートの内訳**(段階ごとにタイムスタンプを打つ。Phase 6の最適化対象) — build / spawn / invoke / destroy
+- [ ] ウォーム呼び出しレイテンシ p50 / p99 — プールが無いので Phase 5 から
+- [ ] インスタンスあたりのメモリフットプリント(ホストから見たRSS) — `InstanceMetrics` が空。必要になった Phase で
+- [ ] 単一ホストでの同時起動可能数 — Phase 1 では見送り(10-20、範囲を最小限に決めた)
+- [x] teardown時間 — `destroy` として内訳に含む(`sandbox-process` は何もしないので 1 µs)
+- [x] 結果を `results/phaseN.csv` に残し、READMEに表として追記していく
 
 **ゴール**: 呼び出し→実行→レスポンスが通り、**数字が出る**。バックエンドが差し替え可能になっている
 
