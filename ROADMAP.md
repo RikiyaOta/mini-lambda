@@ -6,11 +6,13 @@
 
 ## 現在地
 
+- **Phase 2(OS-level 隔離)進行中(2026-10-22〜)** — ステップ 1 完了(10-25): `unshare(CLONE_NEWUSER | CLONE_NEWPID)` + `fork` で、
+  `sudo` なしで子が自分を PID 1・uid 0 と見る状態を作った(`uid_map` / `gid_map` を自分で書く、`setgroups` を `deny` にしてから)。
+  記録は `docs/notes/phase2-isolation.md`、コードは `experiments/oslearn/src/bin/myns.rs`。**次はステップ 2: mount namespace + `pivot_root`**
 - **Phase 1(縦の配線 + 計測基盤)完了(2026-10-22)** — `POST /invoke/{name}` → `sandbox-process` → stdout が返る。
   タイムアウト(manifest の `timeout_ms`)、プロセスグループごとの kill、正常終了後の孫の掃除まで。
   コールドスタート p50 3.7 ms(うち `invoke` 3.2 ms、`strace` で読むと `bash` 起動時の動的リンクと `PATH` 探索が大半)。
   記録は `docs/notes/phase1-wiring.md`、ADR `docs/decisions/0001-sandbox-trait.md`、数字は `results/phase1.csv`。
-  **次は Phase 2(OS-level 隔離)**
 - **Phase -1(OSの基礎)完了(2026-09-24)** — 本を読みながら `experiments/oslearn/` で `nix` を使った演習を3本(`mycp` / `myrun` / `mymem`)やり切った。
 - **Phase 0 の環境構築は完了** — GCPインスタンス作成、KVM動作確認済み
 - **ファイルコピー演習(`mycp`)は完了(2026-09-09)** — Step 1〜5 を通し、下記「到達点の確認」3項目を回収した。
@@ -105,7 +107,7 @@ Google AI Pro 特典の月$10 Cloudクレジットを利用(Google Developer Pro
 | -1    | OSの基礎(前提知識)                        | 2〜3週      | 完了(09-24)    |
 | 0     | 準備と用語の地図                          | 2〜3日      | 完了(CI 以外)  |
 | 1     | 縦の配線 + 計測基盤                       | 3〜5日      | 完了(10-22)    |
-| 2     | OS-level隔離(対照群)                      | 1週間(厳守) |                |
+| 2     | OS-level隔離(対照群)                      | 1週間(厳守) | 進行中(10-22〜) |
 | 3     | 自作VMM①: KVMで数命令動かす               | 2〜3週      |                |
 | 4     | 自作VMM②: Linuxをブートする               | 3〜4週      |                |
 | 5     | guest agent と FaaS 統合                  | 1〜2週      |                |
@@ -230,7 +232,7 @@ trait Instance: Send {
 
 深追いしない。目的は**「共有カーネル型の隔離」を体で知り、後でVMと比較できるようにすること**。これがDockerの仕組みでもある。
 
-- [ ] `nix` クレートで `clone()` / `unshare()` によるnamespace分離(PID / mount / net / user / uts / ipc)
+- [ ] `nix` クレートで `clone()` / `unshare()` によるnamespace分離(PID / mount / net / user / uts / ipc) — PID / user は完了(10-25)
 - [ ] `pivot_root` で最小rootfsに切り替え
 - [ ] cgroup v2: `memory.max`, `cpu.max`, `pids.max` を直接ファイルに書く
 - [ ] `libseccomp-rs` でseccomp-bpfフィルタ。**まず全部deny → 動くまで許可を足す**方式で、必要なsyscall数を数える

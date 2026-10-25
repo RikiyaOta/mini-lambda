@@ -8,7 +8,7 @@
 
 | #   | やること                                                                    | 状態             |
 | --- | --------------------------------------------------------------------------- | ---------------- |
-| 1   | PID namespace(`experiments/oslearn/src/bin/myns.rs`)。子が自分を PID 1 と見る | 🔶 10-25 uid_map / gid_map まで |
+| 1   | PID namespace(`experiments/oslearn/src/bin/myns.rs`)。子が自分を PID 1 と見る | ✅ 10-25(user namespace と uid_map / gid_map まで) |
 | 2   | mount namespace + `pivot_root` で最小 rootfs に切り替える                    | -                |
 | 3   | cgroup v2: `memory.max` / `cpu.max` / `pids.max`                            | -                |
 | 4   | seccomp: 全部 deny → 動くまで許可を足し、必要だった syscall 数を数える       | -                |
