@@ -105,3 +105,31 @@ user 以外の namespace は、作られるときに「持ち主の user namespa
 ## 分かったこと
 
 <!-- 自分の言葉で。上の「説明の控え」を見ずに書けるかを試すとよい -->
+
+- namespace にはいくつかの種類がある。ステップ1では、User namespace, Pid namespace を学んだ。
+- unshare をすると、フラグに応じて新しい namespace が作られる。その後の fork で生成したプロセスは新しい namespace に属することになる。
+- unshare を実行したプロセス自身が新しい namespace に属するかどうかは、namespace ごとに異なる。user namespace については、unshare を実行したプロセス自身も新しい User namespace に属するが、Pid namespace は違う。
+  - そのプロセスから見えている namespace の一覧は `/proc/self/ns` から確認できる。
+- 各プロセスは、自分が属する namespace の一覧のようなものをもっている。自分が属する user namespace はこれ、pid namespace はこれ、といった具合に一覧が配られる。
+- User namespace は、プロセスから見える uid, gid を親のものと対応付けることができる。そのプロセス自身は uid=0 と思っているが、親の namespace 側から見ると、uid=1000 だったりする。
+  - その対応関係は、`/proc/self/uid_map`, `/proc/self/gid_map` に記録する。
+  - 単に unshare, fork しただけではなにもかかれていないので、今回 `myns.rs` では対応関係を自分で書き込んだ。
+  - フォーマットは、1行毎に1つの対応関係を記録するもので、 `<内から見た uid/gid> <外から見た uid/gid> <個数>` である。
+    - `<個数>` は、uid/gid から何個分を対応させるかを指定する。
+  - なお、`/proc/self/gid_map` に書き込むには、`/proc/self/setgroups` を `"deny"` にしておく必要がある。これをすることで、その user namespace にいる全プロセスが `setgroups` syscall を呼ぶことができなくなり、特定のグループから自身を抜けさせるような操作ができなくなり、特定のグループに属しているユーザーに意図しない情報漏洩をさせないようにできる。
+    - なぜこのルールがいるのか？
+      - `setgroups` は通常、`CAP_SETGID` という権限が必要で、普通のプロセスはそれを持っていない。
+      - が、`unshare(CLONE_NEWUSER)` で作った user namespace の中では、作ったプロセス自身が権限を持っており、さらに fork した子プロセスも同じ権限を引き継ぐので、誰でも全権限を持つことになり、`setgroups` を呼べてしまう。
+      - よって、上のような制約が必要になる。
+- Pid namespace は、プロセスから見える pid を親から見えるものとは別のものに対応させるもの。
+  - 親から見れば普通のプロセスだが、子自身は pid=1 など、自分を特殊なプロセスと認識させることができる。
+
+> ✅ (10-25)「namespace は種類ごとに別々」「作られるのは `unshare` の時点だが、本人が入るかは種類で違う」「対応表は自分で書く」
+> 「`setgroups` を `deny` にしないと `gid_map` を書けない」。ステップ 1 の要点は全部入っていて、説明の控えを見ずに書けている
+>
+> ⚠️ `setgroups` の項目を2点だけ:
+> (1) `deny` で禁止されるのは「他のプロセス」ではなく、**その user namespace にいる全プロセス(自分も含む)**
+> (2) **なぜ user namespace のときだけ**この規則が要るのか(namespace の中では誰でも全権限を持てるので、
+> 普段は `CAP_SETGID` が無くて呼べない `setgroups` が呼べてしまう)が抜けている。ここが規則の理由の核心
+>
+> ✅ (10-25 修正後)(1)(2)とも入った。「普段は `CAP_SETGID` が無い → `unshare(CLONE_NEWUSER)` で作った user namespace の中では持ててしまう → だから塞ぐ」の流れで、規則の理由まで説明できている
