@@ -1,4 +1,5 @@
 use nix::{
+    mount::{self, MsFlags},
     sched::{self, CloneFlags},
     sys::wait::waitpid,
     unistd::{ForkResult, execvp, fork, getgid, getpid, getuid},
@@ -15,7 +16,8 @@ fn main() -> nix::Result<()> {
 
     // 新しい User namespace を作り、その中にネストさせて Pid namespace を作る。
     // 現在のプロセスはその新しい User namespace の中に入る。
-    sched::unshare(CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWUSER)?;
+    // CLONE_NEWNS は歴史的な名残でこうなっているが、Mount namespace を作るフラグ。
+    sched::unshare(CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS)?;
 
     println!("---------------------------");
     // すぐに今の pid を確認する。
@@ -73,8 +75,20 @@ fn main() -> nix::Result<()> {
             println!("uid after fork by Child: {}", getuid());
             println!("gid after fork by Child: {}", getgid());
 
+            mount::mount(
+                Some("proc"),
+                "/proc",
+                Some("proc"),
+                MsFlags::empty(),
+                None::<&str>,
+            )
+            .unwrap();
+
             // NOTE: 子プロセスを sleep させてる間にターミナルから色々調べたいときに使う。
             // execvp(c"sleep", &[c"sleep", c"12345"]).unwrap();
+
+            // /proc をマウントし直せているか確認する。
+            execvp(c"ps", &[c"ps"]).unwrap();
         }
         Err(err) => {
             panic!("[Error] fork に失敗しました: {err}");

@@ -9,6 +9,7 @@ nix = { version = "0.31.3", features = [
   "process",
   "signal",
   "mman",
+  "mount",
   "resource",
   "sched",
   "user",
