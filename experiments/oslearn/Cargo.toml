@@ -11,5 +11,6 @@ nix = { version = "0.31.3", features = [
   "mman",
   "resource",
   "sched",
+  "user",
 ] }
 userfaultfd = "0.9"

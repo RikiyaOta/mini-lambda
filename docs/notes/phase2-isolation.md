@@ -8,7 +8,7 @@
 
 | #   | やること                                                                    | 状態             |
 | --- | --------------------------------------------------------------------------- | ---------------- |
-| 1   | PID namespace(`experiments/oslearn/src/bin/myns.rs`)。子が自分を PID 1 と見る | 🔶 10-23 sudo なしで動いた |
+| 1   | PID namespace(`experiments/oslearn/src/bin/myns.rs`)。子が自分を PID 1 と見る | 🔶 10-25 uid_map / gid_map まで |
 | 2   | mount namespace + `pivot_root` で最小 rootfs に切り替える                    | -                |
 | 3   | cgroup v2: `memory.max` / `cpu.max` / `pids.max`                            | -                |
 | 4   | seccomp: 全部 deny → 動くまで許可を足し、必要だった syscall 数を数える       | -                |
@@ -68,6 +68,39 @@ user 以外の namespace は、作られるときに「持ち主の user namespa
 
 `uid_map`(中の uid と外の uid の対応表)を書いていないと、カーネルは対応する番号が無いものとして 65534(nobody)を見せる。
 `unshare --map-root-user` は「中の 0 = 外の 1000」を書いてくれていた。
+
+## 説明の控え(10-25、エージェントが書いたもの)
+
+### 対応表は namespace に1つ
+
+`uid_map` / `gid_map` はプロセスごとではなく、**user namespace ごとに1つ**。`/proc/self/uid_map` は「自分が属する user namespace の対応表」を見せる窓。
+
+- `unshare(CLONE_NEWUSER)` の直後、呼んだ本人はもう新しい user namespace にいる(対応表は空 → uid は 65534)
+- 本人が `/proc/self/uid_map` に書く → その namespace の対応表が決まる → 本人の uid も 0 になる
+- `fork` した子は同じ user namespace にいるので、同じ対応表を使う(親子とも uid 0)
+
+書き方は `<中の id> <外の id> <個数>` の1行。`sudo` なしで書けるのは**自分の uid / gid 1個だけ**なので、外の値は `unshare` の**前**に `getuid()` / `getgid()` で取っておく(後だと 65534)。どちらも1回しか書けない。
+
+### `gid_map` の前に `setgroups` を `deny` にする理由
+
+**グループはプロセスの持ち物。** ログイン時に `/etc/group` からコピーされ、`fork` で子に引き継がれる。
+`id` の `gid=` がメインのグループ、`groups=` が**補助グループ**。ファイルを開くとき、カーネルはこのプロセスの一覧で権限を判定する。
+`setgroups(2)` はこの補助グループの一覧を書き換えるシステムコールで、普通は `CAP_SETGID` が要る。
+
+**危ない例**: グループだけを締め出すファイル
+
+```
+-rwx---rwx  owner=admin  group=banned   secret.txt
+```
+
+`banned` グループの人は何もできず、その他の人は全部できる。`banned` に入れられた人が、自分の補助グループから `banned` を**外せたら**、「その他の人」として判定されて読めてしまう。
+
+**user namespace とのつながり**: namespace の中では誰でも全権限を持てるので、放っておくと `setgroups` で `banned` を外せてしまう。
+そこで「`sudo` なしで `gid_map` を書くなら、先に `/proc/self/setgroups` に `deny` を書いて、グループを外す道を塞げ」という規則になっている。
+
+- `/proc/self/setgroups` の初期値 `allow` は親の namespace からの引き継ぎ。`allow` のままでは `gid_map` を書けない(EPERM)
+- 順番は `setgroups` に `deny` → `gid_map`。`gid_map` を先に書くと、もう `deny` にできない
+- 一次資料: `man 7 user_namespaces` の「Defining user and group ID mappings」と「The /proc/pid/setgroups file」
 
 ## 分かったこと
 
