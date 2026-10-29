@@ -75,6 +75,26 @@ fn main() -> nix::Result<()> {
             println!("uid after fork by Child: {}", getuid());
             println!("gid after fork by Child: {}", getgid());
 
+            // pivot_root で、子プロセスの `/` を `mini-lambda/guest/out/rootfs/` に切り替える。
+            let new_root = "/home/rikiyaota/dev/github.com/RikiyaOta/mini-lambda/guest/out/rootfs/";
+            // 元の rootfs を退避させる場所。あとで unmount する。子は pivot_root のあと new_root 配下しかみれないので、new_root 直下に作っておく。
+            let put_old =
+                "/home/rikiyaota/dev/github.com/RikiyaOta/mini-lambda/guest/out/rootfs/old-root";
+            std::fs::create_dir_all(put_old).unwrap();
+
+            // pivot_root では、new_root が mount point であることを要求する。
+            // そこで、ハックみたいなやり方だが、自分自身に bind mount をすることで解決する。
+            mount::mount(
+                Some(new_root),
+                new_root,
+                None::<&str>,
+                MsFlags::MS_BIND,
+                None::<&str>,
+            )
+            .unwrap();
+            pivot_root(new_root, put_old).unwrap();
+
+            // 新しく /proc をマウントし直す
             mount::mount(
                 Some("proc"),
                 "/proc",
@@ -83,16 +103,6 @@ fn main() -> nix::Result<()> {
                 None::<&str>,
             )
             .unwrap();
-            // /proc をマウントし直せているか確認する。
-            // execvp(c"ps", &[c"ps"]).unwrap();
-
-            // pivot_root で、子プロセスの `/` を `mini-lambda/guest/out/rootfs/` に切り替える。
-            let new_root = "/home/rikiyaota/dev/github.com/RikiyaOta/mini-lambda/guest/out/rootfs/";
-            // 元の rootfs を退避させる場所。あとで unmount する。子は pivot_root のあと new_root 配下しかみれないので、new_root 直下に作っておく。
-            let put_old =
-                "/home/rikiyaota/dev/github.com/RikiyaOta/mini-lambda/guest/out/rootfs/old-root";
-            std::fs::create_dir_all(put_old).unwrap();
-            pivot_root(new_root, put_old).unwrap();
 
             // 新しい `/` に移動する。
             chdir("/").unwrap();
@@ -104,7 +114,8 @@ fn main() -> nix::Result<()> {
             umount2("/old-root", MntFlags::MNT_DETACH).unwrap();
 
             // 確認：`/` がホストのものと異なっていることを確認する。
-            execvp(c"ls", &[c"ls", c"-l", c"/"]).unwrap();
+            // execvp(c"ls", &[c"ls", c"-l", c"/"]).unwrap();
+            execvp(c"ps", &[c"ps"]).unwrap();
         }
         Err(err) => {
             panic!("[Error] fork に失敗しました: {err}");
