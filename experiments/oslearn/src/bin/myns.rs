@@ -1,8 +1,8 @@
 use nix::{
-    mount::{self, MsFlags},
+    mount::{self, MntFlags, MsFlags, umount2},
     sched::{self, CloneFlags},
     sys::wait::waitpid,
-    unistd::{ForkResult, execvp, fork, getgid, getpid, getuid},
+    unistd::{ForkResult, chdir, execvp, fork, getgid, getpid, getuid, pivot_root},
 };
 
 fn main() -> nix::Result<()> {
@@ -83,12 +83,28 @@ fn main() -> nix::Result<()> {
                 None::<&str>,
             )
             .unwrap();
-
-            // NOTE: 子プロセスを sleep させてる間にターミナルから色々調べたいときに使う。
-            // execvp(c"sleep", &[c"sleep", c"12345"]).unwrap();
-
             // /proc をマウントし直せているか確認する。
-            execvp(c"ps", &[c"ps"]).unwrap();
+            // execvp(c"ps", &[c"ps"]).unwrap();
+
+            // pivot_root で、子プロセスの `/` を `mini-lambda/guest/out/rootfs/` に切り替える。
+            let new_root = "/home/rikiyaota/dev/github.com/RikiyaOta/mini-lambda/guest/out/rootfs/";
+            // 元の rootfs を退避させる場所。あとで unmount する。子は pivot_root のあと new_root 配下しかみれないので、new_root 直下に作っておく。
+            let put_old =
+                "/home/rikiyaota/dev/github.com/RikiyaOta/mini-lambda/guest/out/rootfs/old-root";
+            std::fs::create_dir_all(put_old).unwrap();
+            pivot_root(new_root, put_old).unwrap();
+
+            // 新しい `/` に移動する。
+            chdir("/").unwrap();
+
+            // `put_old` を unmount する.
+            // これで子プロセスから、元の rootfs、つまりホストのルートディレクトリが見えなくなった！
+            //
+            // MNT_DETACH : /old-root がまだ他のプロセスに使われている可能性があるので、「今すぐ木から切り離して、使っている人がいなくなったら片付ける」という指定。
+            umount2("/old-root", MntFlags::MNT_DETACH).unwrap();
+
+            // 確認：`/` がホストのものと異なっていることを確認する。
+            execvp(c"ls", &[c"ls", c"-l", c"/"]).unwrap();
         }
         Err(err) => {
             panic!("[Error] fork に失敗しました: {err}");
