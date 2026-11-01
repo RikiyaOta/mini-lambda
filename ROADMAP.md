@@ -8,7 +8,9 @@
 
 - **Phase 2(OS-level 隔離)進行中(2026-10-22〜)** — ステップ 1 完了(10-25): `unshare(CLONE_NEWUSER | CLONE_NEWPID)` + `fork` で、
   `sudo` なしで子が自分を PID 1・uid 0 と見る状態を作った(`uid_map` / `gid_map` を自分で書く、`setgroups` を `deny` にしてから)。
-  記録は `docs/notes/phase2-isolation.md`、コードは `experiments/oslearn/src/bin/myns.rs`。**次はステップ 2: mount namespace + `pivot_root`**
+  ステップ 2 完了(11-01): mount namespace + `pivot_root` で、子から見える `/` を busybox だけの rootfs(`guest/build-rootfs.sh`)に切り替えた。
+  `MS_BIND` で rootfs を自分自身にマウントしてマウントポイントにする、`old-root` を切り離す、`/proc` を貼り直す。
+  記録は `docs/notes/phase2-isolation.md`、コードは `experiments/oslearn/src/bin/myns.rs`。**次はステップ 3: cgroup v2**
 - **Phase 1(縦の配線 + 計測基盤)完了(2026-10-22)** — `POST /invoke/{name}` → `sandbox-process` → stdout が返る。
   タイムアウト(manifest の `timeout_ms`)、プロセスグループごとの kill、正常終了後の孫の掃除まで。
   コールドスタート p50 3.7 ms(うち `invoke` 3.2 ms、`strace` で読むと `bash` 起動時の動的リンクと `PATH` 探索が大半)。
@@ -232,8 +234,8 @@ trait Instance: Send {
 
 深追いしない。目的は**「共有カーネル型の隔離」を体で知り、後でVMと比較できるようにすること**。これがDockerの仕組みでもある。
 
-- [ ] `nix` クレートで `clone()` / `unshare()` によるnamespace分離(PID / mount / net / user / uts / ipc) — PID / user は完了(10-25)
-- [ ] `pivot_root` で最小rootfsに切り替え
+- [ ] `nix` クレートで `clone()` / `unshare()` によるnamespace分離(PID / mount / net / user / uts / ipc) — PID / user(10-25)、mount(11-01)は完了
+- [x] `pivot_root` で最小rootfsに切り替え(11-01)
 - [ ] cgroup v2: `memory.max`, `cpu.max`, `pids.max` を直接ファイルに書く
 - [ ] `libseccomp-rs` でseccomp-bpfフィルタ。**まず全部deny → 動くまで許可を足す**方式で、必要なsyscall数を数える
 - [ ] `Sandbox` 実装として登録し、ベンチを流す
