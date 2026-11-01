@@ -1,7 +1,12 @@
+use std::{num::NonZeroUsize, path::Path, ptr};
+
 use nix::{
     mount::{self, MntFlags, MsFlags, umount2},
     sched::{self, CloneFlags},
-    sys::wait::waitpid,
+    sys::{
+        mman::{MapFlags, ProtFlags, mmap_anonymous},
+        wait::waitpid,
+    },
     unistd::{ForkResult, chdir, execvp, fork, getgid, getpid, getuid, pivot_root},
 };
 
@@ -67,7 +72,19 @@ fn main() -> nix::Result<()> {
             println!("uid after fork by Parent: {}", getuid());
             println!("gid after fork by Parent: {}", getgid());
 
-            waitpid(child, None).unwrap();
+            // cgroup を使って、リソースを制限する。
+            // まず新しいグループを作る(単にディレクトリを作るだけ)。
+            let crgoup_root = Path::new(
+                "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/mini-lambda",
+            );
+            std::fs::create_dir_all(crgoup_root).unwrap();
+            // メモリの上限を設定するために `memory.max` に書き込む。
+            std::fs::write(crgoup_root.join("memory.max"), "10M").unwrap();
+            // 子プロセスをこの新しいグループに登録するために、cgroups.procs に書き込む。
+            std::fs::write(crgoup_root.join("cgroup.procs"), child.as_raw().to_string()).unwrap();
+
+            let result = waitpid(child, None).unwrap();
+            println!("[parent] wait status: {:?}", result);
         }
         Ok(ForkResult::Child) => {
             println!("---------------------------");
@@ -113,6 +130,26 @@ fn main() -> nix::Result<()> {
             // MNT_DETACH : /old-root がまだ他のプロセスに使われている可能性があるので、「今すぐ木から切り離して、使っている人がいなくなったら片付ける」という指定。
             umount2("/old-root", MntFlags::MNT_DETACH).unwrap();
 
+            // 大きくメモリを確保して書き込む処理を実施し、リソース制限が効いているか確認する。
+            // `mymem.rs` でやったように、mmap して書き込む処理をする。
+            unsafe {
+                let memory_size = 1 << 30;
+                let addr = mmap_anonymous(
+                    None,
+                    NonZeroUsize::new(memory_size).unwrap(),
+                    ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+                    MapFlags::MAP_PRIVATE,
+                )
+                .unwrap();
+                let page_count = memory_size / 4096;
+                let base: *mut u8 = addr.as_ptr().cast();
+                for i in 0..page_count {
+                    ptr::write(base.add(i * 4096), 1);
+                }
+            }
+            // 確認：子プロセスが実際に使っている物理メモリを確認する。
+            print_vmsize_vmrss(None);
+
             // 確認：`/` がホストのものと異なっていることを確認する。
             // execvp(c"ls", &[c"ls", c"-l", c"/"]).unwrap();
             execvp(c"ps", &[c"ps"]).unwrap();
@@ -123,4 +160,17 @@ fn main() -> nix::Result<()> {
     }
 
     Ok(())
+}
+
+fn print_vmsize_vmrss(prefix: Option<String>) {
+    let prefix = prefix.unwrap_or("".to_string());
+    std::fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .split("\n")
+        .filter(|line| !line.is_empty())
+        .for_each(|line| {
+            if line.starts_with("VmSize:") || line.starts_with("VmRSS:") {
+                println!("{prefix}{line}");
+            }
+        });
 }
