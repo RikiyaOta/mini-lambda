@@ -1,4 +1,4 @@
-use std::{num::NonZeroUsize, path::Path, ptr};
+use std::{io::ErrorKind, num::NonZeroUsize, path::Path, ptr};
 
 use nix::{
     mount::{self, MntFlags, MsFlags, umount2},
@@ -65,23 +65,30 @@ fn main() -> nix::Result<()> {
     println!("uid after writing into /proc/self/gid_map: {}", getuid());
     println!("gid after writing into /proc/self/gid_map: {}", getgid());
 
+    let crgoup_root =
+        Path::new("/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/mini-lambda");
+
+    // このスクリプトを度々動かしているので、カウンタをリセットするために、cgroup を削除しておく。
+    // ※ 最初にスクリプトを動かすときはまだディレクトリがないので、そのエラーだけは無視しておく。
+    if let Err(e) = std::fs::remove_dir(crgoup_root)
+        && e.kind() != ErrorKind::NotFound
+    {
+        panic!("cgroup の削除に失敗しました: {e}");
+    }
+
+    // cgroup を使って、リソースを制限する。
+    // まず新しいグループを作る(単にディレクトリを作るだけ)。
+    std::fs::create_dir_all(crgoup_root).unwrap();
+    // メモリの上限を設定するために `memory.max`, `memory.swap.max` に書き込む。
+    std::fs::write(crgoup_root.join("memory.max"), "10M").unwrap();
+    std::fs::write(crgoup_root.join("memory.swap.max"), "0").unwrap();
+
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child }) => {
             println!("---------------------------");
             println!("Pid after fork by Parent: {} (child={})", getpid(), child);
             println!("uid after fork by Parent: {}", getuid());
             println!("gid after fork by Parent: {}", getgid());
-
-            // cgroup を使って、リソースを制限する。
-            // まず新しいグループを作る(単にディレクトリを作るだけ)。
-            let crgoup_root = Path::new(
-                "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/mini-lambda",
-            );
-            std::fs::create_dir_all(crgoup_root).unwrap();
-            // メモリの上限を設定するために `memory.max` に書き込む。
-            std::fs::write(crgoup_root.join("memory.max"), "10M").unwrap();
-            // 子プロセスをこの新しいグループに登録するために、cgroups.procs に書き込む。
-            std::fs::write(crgoup_root.join("cgroup.procs"), child.as_raw().to_string()).unwrap();
 
             let result = waitpid(child, None).unwrap();
             println!("[parent] wait status: {:?}", result);
@@ -98,6 +105,16 @@ fn main() -> nix::Result<()> {
             let put_old =
                 "/home/rikiyaota/dev/github.com/RikiyaOta/mini-lambda/guest/out/rootfs/old-root";
             std::fs::create_dir_all(put_old).unwrap();
+
+            // 子プロセスをこの新しいグループに登録するために、cgroups.procs に書き込む。
+            // cgroup_root は pivot_root + umount で見えなくなるので、その前に実施する必要がある。
+            std::fs::write(
+                crgoup_root.join("cgroup.procs"),
+                // NOTE: 書き込んだプロセスから見たPIDを書き込めばOK。
+                // NOTE: このプロセスが Pid namespace の中にいても、プロセスはその属するnamespaceとその中でのPIDを表すデータをカーネルは知っているので。
+                getpid().as_raw().to_string(),
+            )
+            .unwrap();
 
             // pivot_root では、new_root が mount point であることを要求する。
             // そこで、ハックみたいなやり方だが、自分自身に bind mount をすることで解決する。
@@ -133,7 +150,7 @@ fn main() -> nix::Result<()> {
             // 大きくメモリを確保して書き込む処理を実施し、リソース制限が効いているか確認する。
             // `mymem.rs` でやったように、mmap して書き込む処理をする。
             unsafe {
-                let memory_size = 1 << 30;
+                let memory_size = 1 << 25;
                 let addr = mmap_anonymous(
                     None,
                     NonZeroUsize::new(memory_size).unwrap(),
