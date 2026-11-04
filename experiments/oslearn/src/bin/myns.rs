@@ -70,6 +70,8 @@ fn main() -> nix::Result<()> {
     // メモリの上限を設定するために `memory.max`, `memory.swap.max` に書き込む。
     std::fs::write(crgoup_root.join("memory.max"), "10M").unwrap();
     std::fs::write(crgoup_root.join("memory.swap.max"), "0").unwrap();
+    // プロセス数の上限を設定する。
+    std::fs::write(crgoup_root.join("pids.max"), "5").unwrap();
 
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child }) => {
@@ -140,14 +142,22 @@ gid after fork by Parent: {gid}
 
             // 大きくメモリを確保して書き込む処理を実施し、リソース制限が効いているか確認する。
             // `mymem.rs` でやったように、mmap して書き込む処理をする。
-            write_huge_memory(1 << 25);
-
+            // write_huge_memory(1 << 25);
             // 確認：子プロセスが実際に使っている物理メモリを確認する。
-            print_vmsize_vmrss(None);
+            // print_vmsize_vmrss(None);
 
             // 確認：`/` がホストのものと異なっていることを確認する。
             // execvp(c"ls", &[c"ls", c"-l", c"/"]).unwrap();
-            execvp(c"ps", &[c"ps"]).unwrap();
+            //
+            // 確認：子プロセスから見えるプロセス一覧を見てみる。
+            // execvp(c"ps", &[c"ps"]).unwrap();
+            //
+            // 確認：プロセス数の制限が効いていることをみるため、複数プロセスを起動してみる。
+            execvp(
+                c"sh",
+                &[c"sh", c"-c", c"for i in $(seq 1 10); do sleep 777 & done"],
+            )
+            .unwrap();
         }
         Err(err) => {
             panic!("[Error] fork に失敗しました: {err}");
