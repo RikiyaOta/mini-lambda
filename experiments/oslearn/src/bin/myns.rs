@@ -72,6 +72,9 @@ fn main() -> nix::Result<()> {
     std::fs::write(crgoup_root.join("memory.swap.max"), "0").unwrap();
     // プロセス数の上限を設定する。
     std::fs::write(crgoup_root.join("pids.max"), "5").unwrap();
+    // cpu の上限をかける（ 0.1sec ごとに 最大 0.01sec まで、つまり CPU1️⃣個の 10% までという制限）
+    // 注意：数値はマイクロ秒単位
+    std::fs::write(crgoup_root.join("cpu.max"), "10000 100000").unwrap();
 
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child }) => {
@@ -169,9 +172,22 @@ gid after fork by Parent: {gid}
             // execvp(c"ps", &[c"ps"]).unwrap();
             //
             // 確認：プロセス数の制限が効いていることをみるため、複数プロセスを起動してみる。
+            // execvp( c"sh", &[c"sh", c"-c", c"for i in $(seq 1 10); do sleep 777 & done"],) .unwrap();
+            //
+            // 確認：CPUを使い続けるプロセスを起動して制限がかかることを確かめる(終わらないのも困るので、busybox の timeout だけ入れておく)
+            //      ---> ここで１つ発見と注意。`sh` は pid=1　でそのまま実行される。init process
+            //      には、init process
+            //      自身がシグナルハンドラーを定義したシグナルしか送れないのでtimeout処理が完了せずにずっと止まらない。
+            //      namespace の外側からは殺せるので、単に Ctrl-C で止めることはできる。
             execvp(
-                c"sh",
-                &[c"sh", c"-c", c"for i in $(seq 1 10); do sleep 777 & done"],
+                c"timeout",
+                &[
+                    c"timeout",
+                    c"5",
+                    c"sh",
+                    c"-c",
+                    c"echo $$; while :; do :; done",
+                ],
             )
             .unwrap();
         }

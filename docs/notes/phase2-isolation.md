@@ -10,7 +10,7 @@
 | --- | --------------------------------------------------------------------------- | ---------------- |
 | 1   | PID namespace(`experiments/oslearn/src/bin/myns.rs`)。子が自分を PID 1 と見る | ✅ 10-25(user namespace と uid_map / gid_map まで) |
 | 2   | mount namespace + `pivot_root` で最小 rootfs に切り替える                    | ✅ 11-01         |
-| 3   | cgroup v2: `memory.max` / `cpu.max` / `pids.max`                            | -                |
+| 3   | cgroup v2: `memory.max` / `cpu.max` / `pids.max`                            | ✅ 11-08         |
 | 4   | seccomp: 全部 deny → 動くまで許可を足し、必要だった syscall 数を数える       | -                |
 | 5   | `crates/sandbox-ns` として `Sandbox` に登録し、ベンチを流す                  | -                |
 
@@ -248,3 +248,25 @@ Web では <https://elixir.bootlin.com/linux/v6.12/source/include/linux/pid.h> �
 >
 > ✅ (11-08 修正後)(1)(2)とも入った。「cgroup に」に直り、「上限に当たっても `fork` が断られるだけ」と「別の機構として PID namespace では…」で、2つの仕組みがはっきり分かれた。
 > 「`sh` がエラーだろうが正常だろうが」「上限に当たらなくても、`wait` していないので該当する」と、`seq 1 2` の実験の意味まで自分で書けている
+
+- 同じく、cgroup で CPU の利用についての制限をいれるため `cpu.max` に使えるCPU時間を定義した。
+  - 上限を超えたときに、プロセスが殺されたりするのではなく、単にそのプロセスをCPUに割り当てるのを待たせる動きになる。
+  - よって、CPUを使える時間が制限される。
+  - 別件だが、今回 CPU を使い続けるスクリプトとして `timeout 5 sh -c 'while :; do :; done'` のようなスクリプトを実行した。ところが、タイムアウトがされずにずっとループが回り続けた（その間もCPU利用率は設定したとおりに制限されていたことを `top` コマンドで確認した）。
+    - このときの `sh` は pid=1、つまり init process として動いていた。
+    - 実は、PID namespace の init process に送れるシグナルは、init process がシグナルハンドラーを定義したシグナルに制限される。
+    - 今回はシグナルハンドラーを定義していないので、`timeout` が SIGTERM を送れなくてタイムアウト処理が動かなかった。
+    - init process は先述の通り、終了するとその namespace のプロセス全体が終了してしまうので、このような制限を入れているらしい。
+    - なお、SIGKILL, SIGSTOP はそもそもシグナルハンドラーを定義できないシグナルなので、PID namespace の中からは SIGKILL, SIGSTOP は絶対に送れない。
+    - ただし、namespace の外側のプロセスからであればシグナルは送れる。
+
+> ✅ (11-08)「殺すのではなく、CPU に割り当てるのを待たせる」で `cpu.max` の要点が押さえられている。`timeout` の件を「別件」と分けて書き、
+> 「`sh` が PID 1 → init にはハンドラーを登録したシグナルしか届かない → SIGTERM が届かない」と原因まで一本でつながっている。
+> 最後の「終了すると namespace 全体が終わるので、こういう制限がある」も、仕組み同士をつなげて理由を考えられていて良い
+>
+> ⚠️ 1点: SIGKILL の話が抜けている。SIGKILL / SIGSTOP にはハンドラーを登録できないので、
+> **同じ namespace の中からは絶対に届かない**(`timeout -s KILL` でも止まらない)が、**祖先の namespace(ホスト)からは強制的に届く**。
+> 「誰なら PID 1 を止められるか」は、ステップ 5 で `sandbox-ns` のタイムアウトを作るときに直接効いてくる
+
+> ✅ (11-08 修正後)SIGKILL / SIGSTOP は「ハンドラーを定義できないので中からは絶対に送れない」「外側からなら送れる」が入った。
+> 補足: 外側から**強制的に**届くのは SIGKILL と SIGSTOP だけ(それ以外は、外からでも init がハンドラーを登録したものに限られる)
