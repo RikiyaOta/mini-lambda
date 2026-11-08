@@ -10,7 +10,9 @@
   `sudo` なしで子が自分を PID 1・uid 0 と見る状態を作った(`uid_map` / `gid_map` を自分で書く、`setgroups` を `deny` にしてから)。
   ステップ 2 完了(11-01): mount namespace + `pivot_root` で、子から見える `/` を busybox だけの rootfs(`guest/build-rootfs.sh`)に切り替えた。
   `MS_BIND` で rootfs を自分自身にマウントしてマウントポイントにする、`old-root` を切り離す、`/proc` を貼り直す。
-  記録は `docs/notes/phase2-isolation.md`、コードは `experiments/oslearn/src/bin/myns.rs`。**次はステップ 3: cgroup v2**
+  ステップ 3 完了(11-08): cgroup v2 の `memory.max`(+ `memory.swap.max = 0`)/ `pids.max` / `cpu.max` を `sudo` なしで書き、
+  上限に当たったときの3つの振る舞い(殺す / `fork` を断る / 待たせる)を確かめた。PID namespace の init の性質(終了で全員 SIGKILL、中からのシグナルは届かない)も。
+  記録は `docs/notes/phase2-isolation.md`、コードは `experiments/oslearn/src/bin/myns.rs`。**次はステップ 4: seccomp**
 - **Phase 1(縦の配線 + 計測基盤)完了(2026-10-22)** — `POST /invoke/{name}` → `sandbox-process` → stdout が返る。
   タイムアウト(manifest の `timeout_ms`)、プロセスグループごとの kill、正常終了後の孫の掃除まで。
   コールドスタート p50 3.7 ms(うち `invoke` 3.2 ms、`strace` で読むと `bash` 起動時の動的リンクと `PATH` 探索が大半)。
@@ -236,7 +238,7 @@ trait Instance: Send {
 
 - [ ] `nix` クレートで `clone()` / `unshare()` によるnamespace分離(PID / mount / net / user / uts / ipc) — PID / user(10-25)、mount(11-01)は完了
 - [x] `pivot_root` で最小rootfsに切り替え(11-01)
-- [ ] cgroup v2: `memory.max`, `cpu.max`, `pids.max` を直接ファイルに書く
+- [x] cgroup v2: `memory.max`, `cpu.max`, `pids.max` を直接ファイルに書く(11-08)
 - [ ] `libseccomp-rs` でseccomp-bpfフィルタ。**まず全部deny → 動くまで許可を足す**方式で、必要なsyscall数を数える
 - [ ] `Sandbox` 実装として登録し、ベンチを流す
 
