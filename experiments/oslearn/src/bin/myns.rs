@@ -93,11 +93,11 @@ gid after fork by Parent: {gid}
             print_ids("after fork by Child");
 
             // pivot_root で、子プロセスの `/` を `mini-lambda/guest/out/rootfs/` に切り替える。
-            let new_root = "/home/rikiyaota/dev/github.com/RikiyaOta/mini-lambda/guest/out/rootfs/";
+            let new_root =
+                Path::new("/home/rikiyaota/dev/github.com/RikiyaOta/mini-lambda/guest/out/rootfs/");
             // 元の rootfs を退避させる場所。あとで unmount する。子は pivot_root のあと new_root 配下しかみれないので、new_root 直下に作っておく。
-            let put_old =
-                "/home/rikiyaota/dev/github.com/RikiyaOta/mini-lambda/guest/out/rootfs/old-root";
-            std::fs::create_dir_all(put_old).unwrap();
+            let put_old = new_root.join("old-root");
+            std::fs::create_dir_all(&put_old).unwrap();
 
             // 子プロセスをこの新しいグループに登録するために、cgroups.procs に書き込む。
             // cgroup_root は pivot_root + umount で見えなくなるので、その前に実施する必要がある。
@@ -119,7 +119,23 @@ gid after fork by Parent: {gid}
                 None::<&str>,
             )
             .unwrap();
-            pivot_root(new_root, put_old).unwrap();
+            pivot_root(new_root, &put_old).unwrap();
+
+            // あとで `sh -c "sleep ..."` をするときに `/dev/null` が必要になる。
+            // 子からみえる /dev/null もホストと同じものを使うことにする。
+            // /old-root/dev/null にホストの /dev/null が見えているので、そこを使う。
+            // 注意：上で pivot_root をしてるので、ルートが変わっていることに注意。ホストのルートは
+            // /old-root に見えている。
+            let new_dev_null = "/dev/null";
+            let host_dev_null = "/old-root/dev/null";
+            mount::mount(
+                Some(host_dev_null),
+                new_dev_null,
+                None::<&str>,
+                MsFlags::MS_BIND,
+                None::<&str>,
+            )
+            .unwrap();
 
             // 新しく /proc をマウントし直す
             mount::mount(

@@ -24,6 +24,8 @@ fi
 rm -rf "$out"
 mkdir -p "$out"/{bin,proc,dev,tmp,etc,root}
 chmod 1777 "$out/tmp"
+# bind mount の貼り付け先。中身は空の普通のファイルで、これ自体はデバイスではない
+touch "$out/dev/null"
 
 cp "$busybox" "$out/bin/busybox"
 # busybox は「どの名前で呼ばれたか(argv[0])」で動作を切り替える。sh → busybox などのリンクを並べる
