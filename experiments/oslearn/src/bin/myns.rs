@@ -1,6 +1,8 @@
 use std::{io::ErrorKind, num::NonZeroUsize, path::Path, ptr};
 
+use libseccomp::{ScmpAction, ScmpFilterContext, ScmpSyscall};
 use nix::{
+    libc::EPERM,
     mount::{self, MntFlags, MsFlags, umount2},
     sched::{self, CloneFlags},
     sys::{
@@ -165,6 +167,13 @@ gid after fork by Parent: {gid}
             // 確認：子プロセスが実際に使っている物理メモリを確認する。
             // print_vmsize_vmrss(None);
 
+            // seccomp の検証のため、デフォルトで全ての syscall
+            // を許可し、１つだけ禁止するルールを定義する。
+            let mut ctx = ScmpFilterContext::new(ScmpAction::Allow).unwrap();
+            let syscall = ScmpSyscall::from_name("mkdir").unwrap(); // 今回は mkdir を禁止する
+            ctx.add_rule(ScmpAction::Errno(EPERM), syscall).unwrap();
+            ctx.load().unwrap(); // カーネルにこのフィルターを取り付ける。
+
             // 確認：`/` がホストのものと異なっていることを確認する。
             // execvp(c"ls", &[c"ls", c"-l", c"/"]).unwrap();
             //
@@ -179,14 +188,25 @@ gid after fork by Parent: {gid}
             //      には、init process
             //      自身がシグナルハンドラーを定義したシグナルしか送れないのでtimeout処理が完了せずにずっと止まらない。
             //      namespace の外側からは殺せるので、単に Ctrl-C で止めることはできる。
+            // execvp(
+            //     c"timeout",
+            //     &[
+            //         c"timeout",
+            //         c"5",
+            //         c"sh",
+            //         c"-c",
+            //         c"echo $$; while :; do :; done",
+            //     ],
+            // )
+            // .unwrap();
+            //
+            // 確認：seccomp で `mkdir` だけを禁止したので、そのフィルターが効いているか検証する
             execvp(
-                c"timeout",
+                c"sh",
                 &[
-                    c"timeout",
-                    c"5",
                     c"sh",
                     c"-c",
-                    c"echo $$; while :; do :; done",
+                    c"mkdir /tmp/x; echo \"exit=$?\"; grep Seccomp /proc/self/status",
                 ],
             )
             .unwrap();
