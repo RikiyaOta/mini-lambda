@@ -167,11 +167,30 @@ gid after fork by Parent: {gid}
             // 確認：子プロセスが実際に使っている物理メモリを確認する。
             // print_vmsize_vmrss(None);
 
-            // seccomp の検証のため、デフォルトで全ての syscall
-            // を許可し、１つだけ禁止するルールを定義する。
-            let mut ctx = ScmpFilterContext::new(ScmpAction::Allow).unwrap();
-            let syscall = ScmpSyscall::from_name("mkdir").unwrap(); // 今回は mkdir を禁止する
-            ctx.add_rule(ScmpAction::Errno(EPERM), syscall).unwrap();
+            // デフォルトで syscall をすべて禁止する
+            // あとで sh -c "echo hello" を実行するが、それが成功するように一部許可する
+            let mut ctx = ScmpFilterContext::new(ScmpAction::Errno(EPERM)).unwrap();
+            let allow_syscalls = [
+                ScmpSyscall::from_name("execve").unwrap(),
+                ScmpSyscall::from_name("gettid").unwrap(),
+                ScmpSyscall::from_name("write").unwrap(),
+                ScmpSyscall::from_name("futex").unwrap(),
+                ScmpSyscall::from_name("mmap").unwrap(),
+                ScmpSyscall::from_name("brk").unwrap(),
+                ScmpSyscall::from_name("arch_prctl").unwrap(),
+                ScmpSyscall::from_name("exit_group").unwrap(),
+                ScmpSyscall::from_name("set_tid_address").unwrap(),
+                ScmpSyscall::from_name("set_robust_list").unwrap(),
+                ScmpSyscall::from_name("rseq").unwrap(),
+                ScmpSyscall::from_name("prlimit64").unwrap(),
+                ScmpSyscall::from_name("readlinkat").unwrap(),
+                ScmpSyscall::from_name("getrandom").unwrap(),
+                ScmpSyscall::from_name("clock_gettime").unwrap(),
+                ScmpSyscall::from_name("mprotect").unwrap(),
+            ];
+            for syscall in allow_syscalls {
+                ctx.add_rule(ScmpAction::Allow, syscall).unwrap();
+            }
             ctx.load().unwrap(); // カーネルにこのフィルターを取り付ける。
 
             // 確認：`/` がホストのものと異なっていることを確認する。
@@ -200,16 +219,8 @@ gid after fork by Parent: {gid}
             // )
             // .unwrap();
             //
-            // 確認：seccomp で `mkdir` だけを禁止したので、そのフィルターが効いているか検証する
-            execvp(
-                c"sh",
-                &[
-                    c"sh",
-                    c"-c",
-                    c"mkdir /tmp/x; echo \"exit=$?\"; grep Seccomp /proc/self/status",
-                ],
-            )
-            .unwrap();
+            // 確認：許可した syscall で sh -c 'echo hello' が動くことを確認する
+            execvp(c"sh", &[c"sh", c"-c", c"echo hello"]).unwrap();
         }
         Err(err) => {
             panic!("[Error] fork に失敗しました: {err}");
