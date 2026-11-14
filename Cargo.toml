@@ -4,6 +4,7 @@ members = [
     "crates/faas-core",
     "crates/faas-api",
     "crates/sandbox-process",
+    "crates/sandbox-ns",
     "bench",
 ]
 # Phase -1 の練習コードは本体と切り離す
@@ -17,6 +18,7 @@ license = "MIT"
 [workspace.dependencies]
 faas-core = { path = "crates/faas-core" }
 sandbox-process = { path = "crates/sandbox-process" }
+sandbox-ns = { path = "crates/sandbox-ns" }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
 tempfile = "3.27.0"

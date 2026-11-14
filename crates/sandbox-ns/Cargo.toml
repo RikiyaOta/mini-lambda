@@ -1,0 +1,18 @@
+[package]
+name = "sandbox-ns"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# Phase 2 のバックエンド: namespace + cgroup + seccomp の箱の中で関数を実行する。作者が書く。
+# 箱を作る処理はマルチスレッドの tokio からはできない(unshare(CLONE_NEWUSER) が EINVAL)ので、
+# シングルスレッドのヘルパー `ns-helper`(src/bin/ns-helper.rs)を別プロセスとして起動する。
+[dependencies]
+faas-core.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+nix = { workspace = true, features = ["fs", "mount", "process", "sched", "signal", "user"] }
+libseccomp = "0.4.0"
+
+[dev-dependencies]
+tempfile.workspace = true
